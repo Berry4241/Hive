@@ -23,8 +23,8 @@ using TTimer = System.Threading.Timer;
 [assembly: AssemblyTitle("Hive")]
 [assembly: AssemblyDescription("Hive")]
 [assembly: AssemblyProduct("Hive")]
-[assembly: AssemblyVersion("0.59.0.0")]
-[assembly: AssemblyFileVersion("0.59.0.0")]
+[assembly: AssemblyVersion("0.60.0.0")]
+[assembly: AssemblyFileVersion("0.60.0.0")]
 
 namespace Hive
 {
@@ -142,6 +142,7 @@ namespace Hive
     {
         public static long PaintN, PaintT, PollN, PollT, ScanN, ScanT, StatusN, StatusT, ArrangeN, ArrangeT, EvLoc, EvLocWin, EvOther, PlaceN, PlaceT, StackN, StackT;
         public static long TailReads, TailBytes, TailBig, HugeLines, RecLoads, RecBytes, StatusMax;
+        public static long CardN, CardT;
 
         public static long WmN, WmT, AreaSum, AreaMax, SpT, TabT, ApplyN, ApplyT, ApplyCh, RelayN, RelayT, FullInv, StatusCpu, BigN, BigT, LastArea;
         public static long WmStart, PreT, BgT, PaintIn;
@@ -171,11 +172,12 @@ namespace Hive
                 Part("arrange", ArrangeN, ArrangeT) + " (of it: place " + Part("", PlaceN, PlaceT).Trim() + ", stack order " + Part("", StackN, StackT).Trim() + "); " +
                 "window notices: location " + EvLoc + " (" + EvLocWin + " for whole windows), other " + EvOther + "; " +
                 "status reads: transcripts " + TailReads + " (" + (TailBytes >> 20) + " MB, " + TailBig + " over 256 KB, " + HugeLines + " huge entries decoded), records " + RecLoads + " (" + (RecBytes >> 20) + " MB), slowest status " + Ms(StatusMax).ToString("0") + " ms; " +
+                Part("approval-card looks", CardN, CardT) + "; " +
                 "memory clean-ups " + (c0 - g0) + "/" + (c1 - g1) + "/" + (c2 - g2) + " (small/medium/full); private " + (pr.PrivateMemorySize64 >> 20) + " MB" + extra);
             lastAt = now; lastCpu = cpu; uiCpu0 = ui; g0 = c0; g1 = c1; g2 = c2;
             WmN = WmT = AreaSum = AreaMax = BigN = BigT = PreT = BgT = PaintIn = SpT = TabT = ApplyN = ApplyT = ApplyCh = RelayN = RelayT = FullInv = 0; Interlocked.Exchange(ref StatusCpu, 0);
             PaintN = PaintT = PollN = PollT = ScanN = ScanT = StatusN = StatusT = ArrangeN = ArrangeT = EvLoc = EvLocWin = EvOther = PlaceN = PlaceT = StackN = StackT = 0;
-            TailReads = TailBytes = TailBig = HugeLines = RecLoads = RecBytes = StatusMax = 0;
+            TailReads = TailBytes = TailBig = HugeLines = RecLoads = RecBytes = StatusMax = CardN = CardT = 0;
         }
     }
 
@@ -1012,11 +1014,70 @@ namespace Hive
             catch { }
             return null;
         }
+
+        class CardCheck { public long Len; public int N; public long LastAt, PanelAt; public bool Found, Recheck; public System.Windows.Automation.AutomationElement Panel; }
+
+        static readonly long[] CardLookAt = { 3000, 10000, 30000 };
+        static readonly System.Windows.Automation.Condition denyCond = new System.Windows.Automation.AndCondition(
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Button),
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, "Deny"));
+        readonly Dictionary<IntPtr, CardCheck> cards = new Dictionary<IntPtr, CardCheck>();
+        static readonly System.Windows.Automation.Condition chatCond = new System.Windows.Automation.AndCondition(
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Group),
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, "Chat messages"));
+        bool ApprovalCard(Win w, TRec t)
+        {
+            CardCheck c; if (!cards.TryGetValue(w.H, out c)) { c = new CardCheck(); cards[w.H] = c; }
+
+            if (c.Len != t.Len) { c.Len = t.Len; c.N = 0; if (c.Found) c.Recheck = true; }
+
+            if (t.Last == null || !(t.Last.StartsWith("tool: ", StringComparison.Ordinal) || t.Last == "message or tool result"))
+            { if (c.Found) { c.Found = false; c.Recheck = false; Log.W("approval card gone (Claude is writing): " + (w.Label ?? w.Title)); } return false; }
+            long now = T.Now(); long quiet = (long)(DateTime.UtcNow - t.Stamp).TotalMilliseconds;
+            bool due = c.Recheck || (c.Found ? now - c.LastAt >= 15000 : (c.N < CardLookAt.Length ? quiet >= CardLookAt[c.N] : now - c.LastAt >= 60000));
+            if (!due) return c.Found;
+            long t0 = Perf.Now();
+            bool found = FindCard(w.H, c);
+            Perf.CardN++; Perf.CardT += Perf.Now() - t0;
+            c.LastAt = now; c.Recheck = false;
+            while (c.N < CardLookAt.Length && CardLookAt[c.N] <= quiet) c.N++;
+            if (found != c.Found) Log.W((found ? "approval card on screen: " : "approval card gone: ") + (w.Label ?? w.Title) + " (look " + Perf.Ms(Perf.Now() - t0).ToString("0") + " ms)");
+            c.Found = found;
+            return found;
+        }
+        static bool FindCard(IntPtr h, CardCheck c)
+        {
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                try
+                {
+                    long now = T.Now();
+                    if (c.Panel == null || now - c.PanelAt > 20000)
+                    {
+                        var chat = System.Windows.Automation.AutomationElement.FromHandle(h).FindFirst(System.Windows.Automation.TreeScope.Descendants, chatCond);
+                        if (chat == null) { c.Panel = null; return false; }
+                        c.Panel = System.Windows.Automation.TreeWalker.ControlViewWalker.GetParent(chat) ?? chat; c.PanelAt = now;
+                    }
+                    var d = c.Panel.FindFirst(System.Windows.Automation.TreeScope.Descendants, denyCond);
+                    if (d == null) { var alive = c.Panel.Current.ControlType; return false; }
+                    var card = System.Windows.Automation.TreeWalker.ControlViewWalker.GetParent(d);
+                    string n = card != null ? (card.Current.Name ?? "") : "";
+                    if (n.StartsWith("Permission request", StringComparison.Ordinal)) return true;
+
+                    foreach (System.Windows.Automation.AutomationElement b in (card ?? c.Panel).FindAll(System.Windows.Automation.TreeScope.Descendants, homeBtnCond))
+                        if ((b.Current.Name ?? "").StartsWith("Allow", StringComparison.Ordinal)) return true;
+                    return false;
+                }
+                catch { c.Panel = null; }
+            }
+            return false;
+        }
         public Dictionary<IntPtr, StatusResult> Read(IList<Win> wins)
         {
             LoadSessions();
 
             if (idByWin.Count > wins.Count) { var live = new HashSet<IntPtr>(wins.Select(x => x.H)); foreach (var k in idByWin.Keys.Where(k => !live.Contains(k)).ToList()) idByWin.Remove(k); }
+            if (cards.Count > wins.Count) { var live = new HashSet<IntPtr>(wins.Select(x => x.H)); foreach (var k in cards.Keys.Where(k => !live.Contains(k)).ToList()) cards.Remove(k); }
             var o = new Dictionary<IntPtr, StatusResult>();
             foreach (var w in wins)
             {
@@ -1038,6 +1099,9 @@ namespace Hive
                         TRec t = null;
                         if (p != null) { res.Transcript = p; t = Tail(p); }
                         Decide(res, r, t);
+
+                        if (t != null && (res.State == St.Working || (res.State == St.Idle && t.Quiet && r.UserFrame >= r.Edge - 1500)) && ApprovalCard(w, t))
+                        { res.State = St.Waiting; res.At = t.At; res.Last = "an approval card is on screen (Deny / Allow): waits for you; transcript: " + t.Last; }
                         if (p != null && (res.State == St.Done || res.State == St.Idle))
                         {
                             int bg = BackgroundAgents(p);
@@ -1392,7 +1456,7 @@ namespace Hive
             var h = Handle;
             Start();
             if (!claude && !background) LaunchClaude();
-            Log.W("start v0.59: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
+            Log.W("start v0.60: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
         }
 
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= N.WS_EX_TOOLWINDOW | N.WS_EX_NOACTIVATE; return cp; } }
@@ -2454,6 +2518,31 @@ namespace Hive
             return w.At > Math.Max(w.SeenFloor, s) ? St.Done : St.Idle;
         }
 
+        readonly Queue<long> pulls = new Queue<long>();
+        bool PulledForward(Win w)
+        {
+            if (!Live || hiddenNoClaude || parked || minimized || arranging || reopenBusy || !Managed(w) || JustBack(w.Key)) return false;
+            if (Zoomed ? w.Key == zoomKey : PartOf(w) >= 0) return false;
+            var cp = Cursor.Position;
+            IntPtr under = GetAncestor(WindowFromPoint(new N.POINT { X = cp.X, Y = cp.Y }), 2);
+            if (under == IntPtr.Zero || under == w.H) return false;
+            uint pid; N.GetWindowThreadProcessId(under, out pid);
+            var u = all.FirstOrDefault(x => x.H == under);
+            Win back; string where;
+            if (u != null && Managed(u) && ShownWins().Contains(u)) { back = u; where = u.IsMain ? "Home" : u.Label; }
+            else if (pid == myPid) { back = Zoomed ? ByKey(zoomKey) : ActiveWin(); where = "Hive"; }
+            else return false;
+            if (back == null || back.H == w.H || !N.IsWindow(back.H)) return false;
+            long now = T.Now();
+            while (pulls.Count > 0 && now - pulls.Peek() > 10000) pulls.Dequeue();
+            if (pulls.Count >= 6) { Log.W("came forward again and again, so it opens: " + w.Label); return false; }
+            pulls.Enqueue(now);
+            Log.W("came forward by itself, not opened: " + (w.IsMain ? "Home (" + w.Label + ")" : w.Label) + "; the pointer is on " + where + ", so the keyboard goes back to " + (back.IsMain ? "Home" : back.Label));
+            RaiseStack(back.H); Mover.Front(back.H);
+            UpdateFrame(); UpdateHomeCap(); InvalidateChrome();
+            return true;
+        }
+
         void OnWinEvent(IntPtr hook, uint ev, IntPtr h, int obj, int child, uint th, uint t)
         {
             if (ev == 0x800B) { Perf.EvLoc++; if (obj == 0) Perf.EvLocWin++; } else Perf.EvOther++;
@@ -2462,6 +2551,7 @@ namespace Hive
             if (w == null) return;
             if (ev == N.EVENT_SYSTEM_FOREGROUND)
             {
+                if (PulledForward(w)) return;
                 Touch(w);
                 if (hiddenNoClaude || parked || !Managed(w)) { InvalidateChrome(); return; }
                 if (minimized)
