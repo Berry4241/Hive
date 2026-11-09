@@ -23,8 +23,8 @@ using TTimer = System.Threading.Timer;
 [assembly: AssemblyTitle("Hive")]
 [assembly: AssemblyDescription("Hive")]
 [assembly: AssemblyProduct("Hive")]
-[assembly: AssemblyVersion("0.51.0.0")]
-[assembly: AssemblyFileVersion("0.51.0.0")]
+[assembly: AssemblyVersion("0.52.0.0")]
+[assembly: AssemblyFileVersion("0.52.0.0")]
 
 namespace Hive
 {
@@ -803,6 +803,8 @@ namespace Hive
         readonly Dictionary<string, SessRec> byPath = new Dictionary<string, SessRec>(StringComparer.OrdinalIgnoreCase);
         readonly Dictionary<string, string> popByTitle = new Dictionary<string, string>();
         readonly HashSet<string> popIds = new HashSet<string>();
+        readonly Dictionary<string, long> popSeen = new Dictionary<string, long>();
+        public volatile HashSet<string> WindowTitles;
         DateTime popStamp = DateTime.MinValue, lastList = DateTime.MinValue;
         string[] sessFiles = new string[0];
         readonly Dictionary<string, string> cliPath = new Dictionary<string, string>();
@@ -908,6 +910,7 @@ namespace Hive
 
                     popByTitle.Clear(); popIds.Clear(); popStamp = DateTime.MinValue;
                 }
+                long seenNow = T.Now(); foreach (var id in popIds) popSeen[id] = seenNow;
             }
             catch { }
         }
@@ -918,11 +921,15 @@ namespace Hive
             if (isMain)
             {
 
-                foreach (var r in byPath.Values)
-                {
-                    if (r.Archived || r.Id == null || popIds.Contains(r.Id)) continue;
-                    if (best == null || r.Focused > best.Focused || (r.Focused == best.Focused && r.Activity > best.Activity)) best = r;
-                }
+                long ps; var wt = WindowTitles;
+                for (int pass = 0; pass < 2 && best == null; pass++)
+                    foreach (var r in byPath.Values)
+                    {
+                        if (r.Archived || r.Id == null || popIds.Contains(r.Id)) continue;
+                        if (pass == 0 && popSeen.TryGetValue(r.Id, out ps) && ps >= r.Focused - 2000) continue;
+                        if (pass == 0 && wt != null && r.Title != null && wt.Contains(r.Title)) continue;
+                        if (best == null || r.Focused > best.Focused || (r.Focused == best.Focused && r.Activity > best.Activity)) best = r;
+                    }
                 return best;
             }
             string id;
@@ -1307,7 +1314,7 @@ namespace Hive
         WTimer tScan, tAnim, tPoll;
         TTimer tStatus; int statusBusy;
         DockForm dock;
-        bool minimized, arranging;
+        bool minimized, arranging, ownZ;
         bool allowShow, hiddenNoClaude, parked; int noClaudeTicks;
         float spin;
         N.WinEventProc hookCb; readonly List<IntPtr> hooks = new List<IntPtr>();
@@ -1329,7 +1336,7 @@ namespace Hive
             var h = Handle;
             Start();
             if (!claude && !background) LaunchClaude();
-            Log.W("start v0.51: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
+            Log.W("start v0.52: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
         }
 
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= N.WS_EX_TOOLWINDOW | N.WS_EX_NOACTIVATE; return cp; } }
@@ -1654,6 +1661,7 @@ namespace Hive
             snap = all.ToArray();
             for (int i = 0; i < hs.Count; i++) if (!used.ContainsKey(hs[i])) used[hs[i]] = startMs - 60000 - i * 1000;
             foreach (var w in all) if (!S.TabOrder.Contains(w.Key)) { S.TabOrder.Add(w.Key); changed = true; }
+            if (changed || SR.WindowTitles == null) SR.WindowTitles = new HashSet<string>(S.TabOrder.Where(k => k.StartsWith("t:")).Select(k => k.Substring(2)));
             var shown = all.OrderBy(w => S.TabOrder.IndexOf(w.Key)).ToList();
             if (shown.Count != tabs.Count || shown.Where((w, i) => tabs[i] != w).Any()) changed = true;
             tabs = shown;
@@ -2102,7 +2110,7 @@ namespace Hive
             if (top != IntPtr.Zero) { if (!InPlace(top, N.HWND_TOP)) N.SetWindowPos(top, N.HWND_TOP, 0, 0, 0, 0, F); after = top; }
             foreach (var h in shown) { if (h == top) continue; if (!InPlace(h, after)) N.SetWindowPos(h, after, 0, 0, 0, 0, F); after = h; }
             foreach (var fr in frames) if (fr.Visible) foreach (var fh in fr.Handles) { if (!InPlace(fh, after)) N.SetWindowPos(fh, after, 0, 0, 0, 0, F); after = fh; }
-            if (!InPlace(Handle, after)) N.SetWindowPos(Handle, after, 0, 0, 0, 0, F); after = Handle;
+            if (!InPlace(Handle, after)) { ownZ = true; try { N.SetWindowPos(Handle, after, 0, 0, 0, 0, F); } finally { ownZ = false; } } after = Handle;
 
             foreach (var w in ManagedWins().Where(x => !shown.Contains(x.H)).OrderByDescending(UsedAt).ToList()) { if (!InPlace(w.H, after)) N.SetWindowPos(w.H, after, 0, 0, 0, 0, F); after = w.H; }
         }
@@ -2345,6 +2353,12 @@ namespace Hive
         {
             if (m.Msg == 0x000F) { long w0 = Perf.Now(); Perf.WmStart = w0; Perf.LastArea = 0; try { base.WndProc(ref m); } finally { long wd = Perf.Now() - w0; Perf.WmN++; Perf.WmT += wd; if (Perf.LastArea > 1000000) { Perf.BigN++; Perf.BigT += wd; } } return; }
             if (m.Msg == WM_SUMMON) { Summon(m.WParam != IntPtr.Zero); return; }
+
+            if (m.Msg == 0x0046 && !ownZ && Live)
+            {
+                var wpc = (N.WINDOWPOS)Marshal.PtrToStructure(m.LParam, typeof(N.WINDOWPOS));
+                if ((wpc.flags & N.SWP_NOZORDER) == 0) { wpc.flags |= N.SWP_NOZORDER; Marshal.StructureToPtr(wpc, m.LParam, false); }
+            }
             if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == F11Id) { KeyFull(); return; }
             if (m.Msg == 0x0084 && Live)
             {
@@ -3679,6 +3693,7 @@ namespace Hive
             sb.AppendLine("Claude windows: " + hs.Count);
             var wins = hs.Select(h => { var t = Finder.Title(h); return new Win { H = h, Title = t, IsMain = t == "Claude" }; }).ToList();
             var sr = new StatusReader();
+            try { sr.WindowTitles = new HashSet<string>(Settings.Load().TabOrder.Where(k => k.StartsWith("t:")).Select(k => k.Substring(2))); } catch { }
             sb.AppendLine("session records: " + (sr.SessRoot ?? "NOT FOUND"));
             sb.AppendLine("transcripts: " + (sr.ProjDir ?? "NOT FOUND"));
             var sw = Stopwatch.StartNew();
