@@ -22,7 +22,7 @@ Hive doesn't replace or change Claude. Your sessions stay real Claude windows: H
 
 ## What it does
 
-**Tabs for every session.** One tab per session window, in the order you choose: drag a tab to move it. The main Claude window, the one with the sidebar, has a small home mark, so you always know where new sessions start.
+**Tabs for every session.** One tab per session window, in the order you choose: drag a tab to move it. The main Claude window, the one with the sidebar, has a small home mark, so you always know where new sessions start. Its tab shows the name of the session the main window holds, and follows within a few hundredths of a second when you switch sessions there.
 
 **Side-by-side columns.** Open sessions stand next to each other at full height. Drag the gap between two columns to make them wider or narrower, or double-click it to make them equal again. If there isn't room for another column, the session you used longest ago folds by itself, and it comes back when there is room again.
 
@@ -46,7 +46,7 @@ Hive doesn't replace or change Claude. Your sessions stay real Claude windows: H
 
 **Hive Home: its × is hidden.** The main Claude window, the one with the sidebar where new sessions start, is Hive's Home. Its tab and its folded bar carry a house mark. Its own × is hidden under a cover, so Home can't be closed by accident. If it closes another way, Hive opens it again within seconds.
 
-**Light on your PC.** Measured on a 4K screen: about 0.5 % of one CPU core while waiting in the background, 1-2 % while you work. Nothing is sent anywhere.
+**Light on your PC.** Measured on a 4K screen: about 0.5 % of one CPU core while waiting in the background, about 2 % while you work, and up to about 8 % while several sessions are working at once (their marks blink). Nothing is sent anywhere.
 
 <img src="docs/screenshots/hive-folded.png" alt="Four folded sessions side by side, their names stepping down in a staircase, each with its status mark" width="240" align="right">
 
@@ -66,6 +66,8 @@ Hive doesn't touch Claude itself, only how its windows behave while they're insi
 | In Claude's window | Inside Hive |
 |---|---|
 | Home's × | hidden, so the main window can't be closed by accident |
+| Home's width | at least 960 px at 100 % scaling, because Claude shows Home's sidebar only from about 950 px |
+| a window set to stay on top | Hive turns stay-on-top off while the window is inside Hive, so the taskbar stays in front |
 | a session's maximize button □ | that session fills Hive, with the tabs still on top; press it again to go back to columns |
 | a session's minimize button – | all of Hive minimizes together, to one Hive button on the taskbar |
 | dragging a session's left or right edge | resizes its column, and the neighbours follow |
@@ -124,6 +126,7 @@ Either way, Hive keeps its settings and log in a `data` folder next to `Hive.exe
 
 - **Finding and arranging.** Hive looks for the Claude app's windows and moves and sizes them with ordinary Windows calls. Folded sessions wait behind Hive at the width they'll open at, so switching is instant.
 - **Status.** Hive reads the Claude app's own local files, read-only: its session records under `%LOCALAPPDATA%\Claude-Data`, and the end of each session's transcript under `%USERPROFILE%\.claude\projects`. It never writes to them.
+- **Home's name.** Hive reads the name of the session shown in the main window from that window's own header, through Windows UI Automation, read-only. It looks 20 times a second, and each look takes about a tenth of a millisecond.
 - **Bringing sessions back.** Hive remembers which session windows were open. When one is missing, it finds that session in Claude's sidebar through Windows UI Automation and opens it in its own window with the same Ctrl+click you would use. The click is sent to Claude as a window message, so your real mouse and keyboard are never used.
 - **What it writes.** Only its own `data` folder: `settings.json`, `start_positions.json`, and `hive.log` with one older copy, each kept under 2 MB.
 - **What it never does.** No network, no accounts, no telemetry. It never deletes, changes or ends a Claude session. The × closes session windows only; the sessions stay in Claude's sidebar.
@@ -132,7 +135,7 @@ Either way, Hive keeps its settings and log in a `data` folder next to `Hive.exe
 
 - **Unofficial.** Hive relies on details of the Claude desktop app, such as window titles, file names and sidebar labels, that can change with any Claude update. If an update breaks something, please open an issue.
 - **Tested on one setup.** Windows 11 with a 4K screen at 100 % scaling, plus a second 1440p screen. Other scalings are supported but less tested.
-- **Bringing sessions back** needs Claude's interface in English. The session must also appear in Claude's sidebar, not inside a collapsed section. If two sessions share a name, the first one in the sidebar is used.
+- **Bringing sessions back, and the name on Home's tab,** need Claude's interface in English. The session must also appear in Claude's sidebar, not inside a collapsed section. If two sessions share a name, the first one in the sidebar is used.
 - **Sessions that are still working.** Hive closes only the window, and the session itself is expected to carry on in Claude. This hasn't been seen with a session that was mid-task, so let a busy session finish before pressing the ×.
 
 ## Command line

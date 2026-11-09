@@ -23,8 +23,8 @@ using TTimer = System.Threading.Timer;
 [assembly: AssemblyTitle("Hive")]
 [assembly: AssemblyDescription("Hive")]
 [assembly: AssemblyProduct("Hive")]
-[assembly: AssemblyVersion("0.53.0.0")]
-[assembly: AssemblyFileVersion("0.53.0.0")]
+[assembly: AssemblyVersion("0.59.0.0")]
+[assembly: AssemblyFileVersion("0.59.0.0")]
 
 namespace Hive
 {
@@ -442,7 +442,9 @@ namespace Hive
 
         public int CapBarH { get; set; }
         public int CapBarRgb { get; set; }
-        public Settings() { TabOrder = new List<string>(); Outside = new List<string>(); Parts = new List<string>(); LayoutId = "full"; Screen = ""; ContMax = true; Widths = new Dictionary<string, double>(); Open = new List<string>(); Pinned = new List<string>(); PinW = new Dictionary<string, double>(); OwnW = new Dictionary<string, double>(); AutoFolded = new List<string>(); }
+
+        public Dictionary<string, long> PopSeen { get; set; }
+        public Settings() { PopSeen = new Dictionary<string, long>(); TabOrder = new List<string>(); Outside = new List<string>(); Parts = new List<string>(); LayoutId = "full"; Screen = ""; ContMax = true; Widths = new Dictionary<string, double>(); Open = new List<string>(); Pinned = new List<string>(); PinW = new Dictionary<string, double>(); OwnW = new Dictionary<string, double>(); AutoFolded = new List<string>(); }
         static string FilePath { get { return Path.Combine(Program.DataDir, "settings.json"); } }
         public static Settings Load()
         {
@@ -804,7 +806,19 @@ namespace Hive
         readonly Dictionary<string, string> popByTitle = new Dictionary<string, string>();
         readonly HashSet<string> popIds = new HashSet<string>();
         readonly Dictionary<string, long> popSeen = new Dictionary<string, long>();
-        public volatile HashSet<string> WindowTitles;
+
+        readonly object popLock = new object();
+        public volatile int PopSeenVersion;
+        public void SeedPopSeen(Dictionary<string, long> saved)
+        {
+            if (saved == null) return;
+            lock (popLock) foreach (var kv in saved) { long v; if (!popSeen.TryGetValue(kv.Key, out v) || v < kv.Value) popSeen[kv.Key] = kv.Value; }
+        }
+        public Dictionary<string, long> PopSeenCopy()
+        {
+            long old = T.Now() - 30L * 24 * 3600 * 1000;
+            lock (popLock) return popSeen.Where(kv => kv.Value >= old).ToDictionary(kv => kv.Key, kv => kv.Value);
+        }
         DateTime popStamp = DateTime.MinValue, lastList = DateTime.MinValue;
         string[] sessFiles = new string[0];
         readonly Dictionary<string, string> cliPath = new Dictionary<string, string>();
@@ -883,6 +897,7 @@ namespace Hive
             }
             try
             {
+                HashSet<string> before = null;
                 if (PopFile != null && File.Exists(PopFile))
                 {
                     var plw = File.GetLastWriteTimeUtc(PopFile);
@@ -892,6 +907,7 @@ namespace Hive
                         var arr = Arr(d, "popouts");
                         if (arr != null)
                         {
+                            before = new HashSet<string>(popIds);
                             popByTitle.Clear(); popIds.Clear();
                             foreach (var o in arr)
                             {
@@ -908,9 +924,12 @@ namespace Hive
                 else if (popStamp != DateTime.MinValue)
                 {
 
+                    before = new HashSet<string>(popIds);
                     popByTitle.Clear(); popIds.Clear(); popStamp = DateTime.MinValue;
                 }
-                long seenNow = T.Now(); foreach (var id in popIds) popSeen[id] = seenNow;
+                long seenNow = T.Now();
+                lock (popLock) foreach (var id in popIds) popSeen[id] = seenNow;
+                if (before != null && !before.SetEquals(popIds)) PopSeenVersion++;
             }
             catch { }
         }
@@ -921,13 +940,12 @@ namespace Hive
             if (isMain)
             {
 
-                long ps; var wt = WindowTitles;
+                long ps;
                 for (int pass = 0; pass < 2 && best == null; pass++)
                     foreach (var r in byPath.Values)
                     {
                         if (r.Archived || r.Id == null || popIds.Contains(r.Id)) continue;
                         if (pass == 0 && popSeen.TryGetValue(r.Id, out ps) && ps >= r.Focused - 2000) continue;
-                        if (pass == 0 && wt != null && r.Title != null && wt.Contains(r.Title)) continue;
                         if (best == null || r.Focused > best.Focused || (r.Focused == best.Focused && r.Activity > best.Activity)) best = r;
                     }
                 return best;
@@ -962,6 +980,38 @@ namespace Hive
             return null;
         }
 
+        public volatile string HomeTitleNow;
+        static readonly System.Windows.Automation.Condition homeBarCond = new System.Windows.Automation.AndCondition(
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.ToolBar),
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, "Session tools"));
+        static readonly System.Windows.Automation.Condition homeBtnCond =
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Button);
+        const string RenameSuffix = ", rename session";
+        public static string HomeTitle(IntPtr mainH) { var b = HomeButton(mainH); return b != null ? TitleOf(b) : null; }
+
+        public static System.Windows.Automation.AutomationElement HomeButton(IntPtr mainH)
+        {
+            try
+            {
+                var root = System.Windows.Automation.AutomationElement.FromHandle(mainH);
+                var bar = root.FindFirst(System.Windows.Automation.TreeScope.Descendants, homeBarCond);
+                if (bar == null) return null;
+                foreach (System.Windows.Automation.AutomationElement b in bar.FindAll(System.Windows.Automation.TreeScope.Descendants, homeBtnCond))
+                    if (TitleOf(b) != null) return b;
+            }
+            catch { }
+            return null;
+        }
+        public static string TitleOf(System.Windows.Automation.AutomationElement b)
+        {
+            try
+            {
+                var n = b.Current.Name;
+                if (n != null && n.EndsWith(RenameSuffix, StringComparison.Ordinal) && n.Length > RenameSuffix.Length) return n.Substring(0, n.Length - RenameSuffix.Length);
+            }
+            catch { }
+            return null;
+        }
         public Dictionary<IntPtr, StatusResult> Read(IList<Win> wins)
         {
             LoadSessions();
@@ -975,10 +1025,14 @@ namespace Hive
                 {
                     SessRec r = null; string sid;
                     if (!w.IsMain && idByWin.TryGetValue(w.H, out sid)) r = byPath.Values.FirstOrDefault(x => x.Id == sid && !x.Archived);
+
+                    string ht = w.IsMain ? HomeTitleNow : null;
+                    if (r == null && ht != null) r = Find(ht, false);
                     if (r == null) { r = Find(w.Title, w.IsMain); if (r != null && !w.IsMain) idByWin[w.H] = r.Id; }
+                    if (ht != null) res.SessionTitle = ht;
                     if (r != null)
                     {
-                        res.SessionId = r.Id; res.SessionTitle = r.Title; res.SeenFloor = Math.Max(r.Focused, r.UserFrame);
+                        res.SessionId = r.Id; res.SessionTitle = ht ?? r.Title; res.SeenFloor = Math.Max(r.Focused, r.UserFrame);
                         string p1 = TPath(r.Cli2), p2 = TPath(r.Cli), p = p1;
                         if (p == null || (p2 != null && p2 != p1 && File.GetLastWriteTimeUtc(p2) > File.GetLastWriteTimeUtc(p1))) p = p2;
                         TRec t = null;
@@ -1264,6 +1318,7 @@ namespace Hive
         const string ClaudeApp = "Claude_pzs8sxrjxfjjc!Claude";
         Settings S;
         readonly StatusReader SR = new StatusReader();
+        int popSeenSaved;
         List<Win> all = new List<Win>();
         List<Win> tabs = new List<Win>();
         volatile Win[] snap = new Win[0];
@@ -1322,6 +1377,7 @@ namespace Hive
         public Container(Settings s, bool background)
         {
             Me = this; S = s;
+            SR.SeedPopSeen(S.PopSeen);
 
             if (S.LayoutId == "all" && S.Parts.Count > 0) Lay.AutoCurrent = new Lay("all", S.Parts.Select(k => new RectangleF(0, 0, 1, 1)).ToArray());
             FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
@@ -1336,7 +1392,7 @@ namespace Hive
             var h = Handle;
             Start();
             if (!claude && !background) LaunchClaude();
-            Log.W("start v0.53: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
+            Log.W("start v0.59: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
         }
 
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= N.WS_EX_TOOLWINDOW | N.WS_EX_NOACTIVATE; return cp; } }
@@ -1408,6 +1464,30 @@ namespace Hive
         int FocusWidth() { return S.FocusW > 0 ? S.FocusW : (int)Math.Round(1079 * sc); }
 
         int OwnWidth(string k) { double v; return k != null && S.OwnW.TryGetValue(k, out v) && v > 0 ? (int)Math.Round(v * sc) : FocusWidth(); }
+
+        int HomeMinW() { return (int)Math.Round(960 * sc); }
+
+        int FloorOf(string k)
+        {
+            int f = MinOpenW(), m;
+            if (k != null && minW.TryGetValue(k, out m)) f = Math.Max(f, m);
+            if (k == "main") f = Math.Max(f, HomeMinW());
+            return f;
+        }
+
+        int MostFor(string key)
+        {
+            int sw = SpineW(), g = Gap(), used = 0;
+            var seq = tabs.Where(Managed).Select(w => w.Key).ToList();
+            for (int i = 0; i < seq.Count; i++)
+            {
+                if (!S.Parts.Contains(seq[i])) { used += sw; continue; }
+                if (i + 1 < seq.Count && S.Parts.Contains(seq[i + 1])) used += g;
+                if (seq[i] == key) continue;
+                used += S.Pinned.Contains(seq[i]) ? Math.Max(OwnWidth(seq[i]), FloorOf(seq[i])) : FloorOf(seq[i]);
+            }
+            return Content().Width - used;
+        }
         Rectangle PartRect(int i)
         {
             if (S.LayoutId == "all")
@@ -1441,6 +1521,48 @@ namespace Hive
             minimizeTick = restoreTick = Tick();
             Scan();
             tStatus = new TTimer(StatusTick, null, 200, 1000);
+            new Thread(HomeWatchLoop) { IsBackground = true, Name = "home name" }.Start();
+        }
+
+        volatile IntPtr homeWatchH;
+
+        void HomeWatchLoop()
+        {
+            System.Windows.Automation.AutomationElement btn = null; IntPtr btnFor = IntPtr.Zero; long nextFind = 0, missingSince = 0; string last = null;
+            while (true)
+            {
+                Thread.Sleep(50);
+                try
+                {
+                    var h = homeWatchH;
+                    if (h == IntPtr.Zero) { btn = null; continue; }
+                    if (h != btnFor) { btn = null; btnFor = h; nextFind = 0; missingSince = 0; }
+                    string t = btn != null ? StatusReader.TitleOf(btn) : null;
+                    if (t == null)
+                    {
+                        long now = T.Now();
+                        if (missingSince == 0) missingSince = now;
+                        bool fast = now - missingSince < 2000;
+                        if (!fast && now < nextFind) continue;
+                        btn = StatusReader.HomeButton(h);
+                        t = btn != null ? StatusReader.TitleOf(btn) : null;
+                        if (t == null) { if (!fast) nextFind = now + 1000; continue; }
+                    }
+                    missingSince = 0;
+                    if (t == last) continue;
+                    last = t; SR.HomeTitleNow = t;
+                    if (IsHandleCreated) BeginInvoke(new Action(delegate { HomeNameChanged(t); }));
+                }
+                catch { btn = null; }
+            }
+        }
+        void HomeNameChanged(string t)
+        {
+            var w = all.FirstOrDefault(x => x.IsMain);
+            if (w == null || w.Label == t) return;
+            Log.W("home tab now shows: " + t + " (read from the main window)");
+            w.Label = t; Relayout(); InvalidateLayout();
+            try { if (tStatus != null) tStatus.Change(0, 1000); } catch { }
         }
 
         public static void LaunchClaude()
@@ -1656,12 +1778,13 @@ namespace Hive
             if (next.Count != all.Count) changed = true;
             if (changed) Prune(hs, next);
             all = next;
+            { var mw = all.FirstOrDefault(x => x.IsMain); homeWatchH = mw != null ? mw.H : IntPtr.Zero; }
             HomeWatch(hs.Count);
             if (zoomKey != null && hs.Count > 0 && ByKey(zoomKey) == null) { Log.W("the session that filled Hive closed: back to the columns"); zoomKey = null; changed = true; }
             snap = all.ToArray();
             for (int i = 0; i < hs.Count; i++) if (!used.ContainsKey(hs[i])) used[hs[i]] = startMs - 60000 - i * 1000;
             foreach (var w in all) if (!S.TabOrder.Contains(w.Key)) { S.TabOrder.Add(w.Key); changed = true; }
-            if (changed || SR.WindowTitles == null) SR.WindowTitles = new HashSet<string>(S.TabOrder.Where(k => k.StartsWith("t:")).Select(k => k.Substring(2)));
+            if (SR.PopSeenVersion != popSeenSaved) { popSeenSaved = SR.PopSeenVersion; S.PopSeen = SR.PopSeenCopy(); S.Save(); }
             var shown = all.OrderBy(w => S.TabOrder.IndexOf(w.Key)).ToList();
             if (shown.Count != tabs.Count || shown.Where((w, i) => tabs[i] != w).Any()) changed = true;
             tabs = shown;
@@ -1848,6 +1971,11 @@ namespace Hive
         }
         void Keep()
         {
+            if (AnyOnTop())
+            {
+                var fg = N.GetForegroundWindow(); bool other = !ForegroundIsOurs(fg); var a = ActiveWin();
+                RaiseStack(!other && a != null && ShownWins().Contains(a) ? a.H : IntPtr.Zero, other ? fg : IntPtr.Zero);
+            }
             EnsureAll();
             var L = Lay.Get(S.LayoutId); FixParts(L);
             var shown = ShownWins(); var c = Content();
@@ -1964,10 +2092,19 @@ namespace Hive
             var c = Content(); N.RECT wr; N.GetWindowRect(Handle, out wr);
             int sw = SpineW(), g = Gap(), mnW = MinOpenW(), std = Math.Max(mnW, FocusWidth());
             int rowW = c.Width;
-            Func<string, int> colW = k => { int m; int v = S.Pinned.Contains(k) ? Math.Max(mnW, OwnWidth(k)) : std; return minW.TryGetValue(k, out m) ? Math.Max(v, m) : v; };
+            Func<string, int> colW = k => Math.Max(S.Pinned.Contains(k) ? OwnWidth(k) : std, FloorOf(k));
             Func<List<string>, int> need = ks => ks.Sum(colW) + (managed.Count - ks.Count) * sw + Math.Max(0, ks.Count - 1) * g;
             int max = Math.Max(1, (rowW - managed.Count * sw + g) / Math.Max(1, std - sw + g));
-            while (mayFold && openNow.Count > 1 && need(openNow) > rowW)
+
+            Func<List<string>, bool> mustFold = ks =>
+            {
+                int fixedPx = (managed.Count - ks.Count) * sw + Math.Max(0, ks.Count - 1) * g;
+                if (fixedPx + ks.Sum(k => FloorOf(k)) > rowW) return true;
+                var stdKeys = ks.Where(k => !S.Pinned.Contains(k)).ToList();
+                if (stdKeys.Count < 2) return false;
+                return stdKeys.Sum(colW) > rowW - fixedPx - ks.Where(k => S.Pinned.Contains(k)).Sum(colW);
+            };
+            while (mayFold && openNow.Count > 1 && mustFold(openNow))
             {
                 var lru = openNow.Where(k => k != act && !S.Pinned.Contains(k)).OrderBy(k => { var w = ByKey(k); return w == null ? 0 : UsedAt(w); }).FirstOrDefault();
                 if (lru == null) break;
@@ -1995,7 +2132,7 @@ namespace Hive
             {
 
                 int over = used - rowW;
-                Func<int, int> floorOf = i => { int m; return Math.Max(mnW, minW.TryGetValue(openKeys[i], out m) ? m : 0); };
+                Func<int, int> floorOf = i => FloorOf(openKeys[i]);
                 foreach (bool pinnedPass in new[] { false, true })
                 {
                     var give = Enumerable.Range(0, px.Length).Where(i => S.Pinned.Contains(openKeys[i]) == pinnedPass && px[i] > floorOf(i)).ToList();
@@ -2115,9 +2252,38 @@ namespace Hive
         }
 
         void RaiseStack(IntPtr top, IntPtr behind = default(IntPtr)) { var tw = Stopwatch.StartNew(); try { RaiseStackCore(top, behind); } finally { Perf.StackN++; Perf.StackT += tw.ElapsedTicks; if (tw.ElapsedMilliseconds >= 30) Perf.ArrangeDetail.Append(" stack order " + tw.ElapsedMilliseconds + " ms;"); Mover.Slow("stack order, front:", top, tw); } }
+
+        int onTopLogs;
+        IEnumerable<KeyValuePair<IntPtr, string>> StackWindows()
+        {
+            yield return new KeyValuePair<IntPtr, string>(Handle, "Hive");
+            foreach (var w in ManagedWins()) yield return new KeyValuePair<IntPtr, string>(w.H, w.Label ?? w.Title);
+            foreach (var fr in frames) if (fr.IsHandleCreated) foreach (var fh in fr.Handles) yield return new KeyValuePair<IntPtr, string>(fh, "the line around a column");
+            if (cap != null && cap.IsHandleCreated) yield return new KeyValuePair<IntPtr, string>(cap.Handle, "the home cover");
+        }
+        static bool OnTop(IntPtr h) { return h != IntPtr.Zero && (GetWindowLongPtr(h, -20).ToInt64() & N.WS_EX_TOPMOST) != 0; }
+        bool AnyOnTop() { return StackWindows().Any(kv => OnTop(kv.Key)); }
+        void ClearOnTop()
+        {
+            const uint F = N.SWP_NOMOVE | N.SWP_NOSIZE | N.SWP_NOACTIVATE | N.SWP_NOOWNERZORDER;
+            var names = new List<string>();
+            foreach (var kv in StackWindows().ToList())
+            {
+                if (!OnTop(kv.Key)) continue;
+                if (kv.Key == Handle) { ownZ = true; try { N.SetWindowPos(kv.Key, N.HWND_NOTOPMOST, 0, 0, 0, 0, F); } finally { ownZ = false; } }
+                else N.SetWindowPos(kv.Key, N.HWND_NOTOPMOST, 0, 0, 0, 0, F);
+                if (!names.Contains(kv.Value)) names.Add(kv.Value);
+            }
+            if (names.Count > 0 && onTopLogs++ < 30)
+            {
+                var fg = N.GetForegroundWindow(); var t = new StringBuilder(80); GetClassName(fg, t, 80);
+                Log.W("stay-on-top taken off (Hive's windows stay under the taskbar): " + string.Join(", ", names) + "; in front: " + Finder.Title(fg) + " [" + t + "]");
+            }
+        }
         void RaiseStackCore(IntPtr top, IntPtr behind)
         {
             const uint F = N.SWP_NOMOVE | N.SWP_NOSIZE | N.SWP_NOACTIVATE | N.SWP_NOOWNERZORDER;
+            ClearOnTop();
             var shown = ShownWins().Select(w => w.H).ToList();
 
             IntPtr after = behind != IntPtr.Zero && (GetWindowLongPtr(behind, -20).ToInt64() & N.WS_EX_TOPMOST) == 0 ? behind : N.HWND_TOP;
@@ -2268,6 +2434,7 @@ namespace Hive
                 if (!res.TryGetValue(w.H, out r)) continue;
 
                 string label = !string.IsNullOrEmpty(r.SessionTitle) ? r.SessionTitle : (w.IsMain ? "Claude" : w.Title);
+                if (w.IsMain && w.Label != label) Log.W("home tab now shows: " + label);
                 if (w.State != r.State || w.At != r.At || w.SeenFloor != r.SeenFloor || w.Label != label) ch = true;
                 w.State = r.State; w.At = r.At; w.SeenFloor = r.SeenFloor; w.Label = label; w.SessionId = r.SessionId;
             }
@@ -3209,7 +3376,9 @@ namespace Hive
 
                 bool own = key == edgeKey && edgeH != IntPtr.Zero;
                 int still = rightEdge ? (own ? edgeWant.X : me.X) : (own ? edgeWant.Right : me.Right);
-                int pw = rightEdge ? edgeX - still : still - edgeX; if (pw > 0) S.OwnW[key] = Math.Max(MinOpenW(), pw) / (double)sc;
+                int pw = rightEdge ? edgeX - still : still - edgeX;
+                pw = Math.Min(pw, MostFor(key));
+                if (pw > 0) S.OwnW[key] = Math.Max(MinOpenW(), pw) / (double)sc;
             }
             else
             {
@@ -3503,7 +3672,7 @@ namespace Hive
             Log.W("closing (" + e.CloseReason + ")");
             try { foreach (var h in hooks) if (h != IntPtr.Zero) N.UnhookWinEvent(h); } catch (Exception x) { Log.W("close hooks: " + x.Message); }
             try { if (tStatus != null) tStatus.Dispose(); } catch (Exception x) { Log.W("close status: " + x.Message); }
-            try { S.Save(); } catch (Exception x) { Log.W("close save: " + x.Message); }
+            try { S.PopSeen = SR.PopSeenCopy(); S.Save(); } catch (Exception x) { Log.W("close save: " + x.Message); }
             Log.W("quit");
             base.OnFormClosing(e);
         }
@@ -3708,7 +3877,8 @@ namespace Hive
             sb.AppendLine("Claude windows: " + hs.Count);
             var wins = hs.Select(h => { var t = Finder.Title(h); return new Win { H = h, Title = t, IsMain = t == "Claude" }; }).ToList();
             var sr = new StatusReader();
-            try { sr.WindowTitles = new HashSet<string>(Settings.Load().TabOrder.Where(k => k.StartsWith("t:")).Select(k => k.Substring(2))); } catch { }
+            try { sr.SeedPopSeen(Settings.Load().PopSeen); } catch { }
+            { var mw = wins.FirstOrDefault(x => x.IsMain); if (mw != null) sr.HomeTitleNow = StatusReader.HomeTitle(mw.H); }
             sb.AppendLine("session records: " + (sr.SessRoot ?? "NOT FOUND"));
             sb.AppendLine("transcripts: " + (sr.ProjDir ?? "NOT FOUND"));
             var sw = Stopwatch.StartNew();
