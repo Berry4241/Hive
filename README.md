@@ -84,14 +84,22 @@ Only that one pop-up is turned off. Win+Z and dragging a window to a screen edge
 - The Claude desktop app for Windows, with Claude Code sessions opened in their own windows ("Open in new window", or Ctrl+click a session in the sidebar).
 - Nothing else. Hive is built with the C# compiler that is already part of Windows (.NET Framework 4.8).
 
-## Build
+## Download
+
+1. Download **Hive.exe** from the [latest release](https://github.com/Berry4241/Hive/releases/latest) and put it in a folder of its own.
+2. Turn off Windows' split menu (see above), once.
+3. Run `Hive.exe`.
+
+Hive.exe isn't signed, so Windows may show **"Windows protected your PC"**: click **More info**, then **Run anyway**. Each release's Hive.exe is built from that release's source with `build.bat`, and the release notes give its SHA-256 so you can check the file. If you'd rather not run a downloaded program, build it yourself instead.
+
+## Build it yourself
 
 1. Download this repository: the green **Code** button → **Download ZIP**, then unzip it (or clone it with git).
 2. Double-click **`build.bat`**. It makes `Hive.exe` next to it in a few seconds and installs nothing.
 3. Turn off Windows' split menu (see above), once.
 4. Run `Hive.exe`.
 
-Hive keeps its settings and log in a `data` folder next to `Hive.exe`. To remove Hive, delete its folder.
+Either way, Hive keeps its settings and log in a `data` folder next to `Hive.exe`. To remove Hive, delete its folder.
 
 ## Use
 
