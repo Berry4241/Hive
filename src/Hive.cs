@@ -23,8 +23,8 @@ using TTimer = System.Threading.Timer;
 [assembly: AssemblyTitle("Hive")]
 [assembly: AssemblyDescription("Hive")]
 [assembly: AssemblyProduct("Hive")]
-[assembly: AssemblyVersion("0.52.0.0")]
-[assembly: AssemblyFileVersion("0.52.0.0")]
+[assembly: AssemblyVersion("0.53.0.0")]
+[assembly: AssemblyFileVersion("0.53.0.0")]
 
 namespace Hive
 {
@@ -1336,7 +1336,7 @@ namespace Hive
             var h = Handle;
             Start();
             if (!claude && !background) LaunchClaude();
-            Log.W("start v0.52: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
+            Log.W("start v0.53: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
         }
 
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= N.WS_EX_TOOLWINDOW | N.WS_EX_NOACTIVATE; return cp; } }
@@ -1741,6 +1741,14 @@ namespace Hive
         }
 
         HomeCap cap; Rectangle capRect; IntPtr capFor = IntPtr.Zero; Color capBar = Color.Empty, capDrawn = Color.Empty; int capBarH, capReads; N.RECT capWin; long capLookAt = -100000; string capState = "";
+        int capPendH, capPendRgb, capDoubts; long capPendAt;
+
+        internal static bool AcceptBarRead(int h100, int rgb, int goodH, int goodRgb, ref int pendH, ref int pendRgb, ref long pendAt, long now)
+        {
+            if (goodH <= 0 || (h100 == goodH && rgb == goodRgb)) { pendH = 0; return true; }
+            if (pendH == h100 && pendRgb == rgb && now - pendAt <= 5000) { pendH = 0; return true; }
+            pendH = h100; pendRgb = rgb; pendAt = now; return false;
+        }
         [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(N.POINT p);
         [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
         void HideCap(string why)
@@ -1807,11 +1815,18 @@ namespace Hive
                     if (capReads++ < 3) Log.W("home cover: title bar read in " + tr.ElapsedMilliseconds + " ms");
                     var b = bmp.GetPixel(0, b0); int hb = -1;
                     for (int y = (int)Math.Round(20 * sc); y < n && hb < 0; y++) { var c = bmp.GetPixel(0, y); if (Math.Abs(c.R - b.R) + Math.Abs(c.G - b.G) + Math.Abs(c.B - b.B) > 20) hb = y; }
-                    capLookAt = T.Now(); capBarH = hb; capBar = Color.FromArgb(b.R, b.G, b.B); capFor = home;
+                    capLookAt = T.Now(); capFor = home;
+                    int h100 = hb > 0 ? (int)Math.Round(hb / sc) : -1, rgb = (b.R << 16) | (b.G << 8) | b.B;
+                    if (hb > 0 && !AcceptBarRead(h100, rgb, S.CapBarH, S.CapBarRgb, ref capPendH, ref capPendRgb, ref capPendAt, capLookAt))
+                    {
+                        capBarH = -1; capBar = Color.Empty;
+                        if (capDoubts++ < 10) Log.W("home cover: a title bar reading differs from the last good look (" + h100 + " px, #" + rgb.ToString("x6") + " against " + S.CapBarH + " px, #" + S.CapBarRgb.ToString("x6") + "); kept the last good look, reading again in a second");
+                        return;
+                    }
+                    capBarH = hb; capBar = Color.FromArgb(b.R, b.G, b.B);
                     if (hb > 0)
                     {
-                        int h100 = (int)Math.Round(hb / sc), rgb = (b.R << 16) | (b.G << 8) | b.B;
-                        if (h100 != S.CapBarH || rgb != S.CapBarRgb) { S.CapBarH = h100; S.CapBarRgb = rgb; S.Save(); }
+                        if (h100 != S.CapBarH || rgb != S.CapBarRgb) { Log.W("home cover: the title bar's look changed to " + h100 + " px, #" + rgb.ToString("x6") + " (read twice)"); S.CapBarH = h100; S.CapBarRgb = rgb; S.Save(); }
                     }
                 }
             }
