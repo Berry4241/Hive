@@ -1,0 +1,7 @@
+# built programs
+Hive.exe
+tools/screenshots/HiveDemo.exe
+*.pdb
+
+# Hive's own settings and log, made next to Hive.exe when it runs
+data/
