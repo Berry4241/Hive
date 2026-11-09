@@ -23,8 +23,8 @@ using TTimer = System.Threading.Timer;
 [assembly: AssemblyTitle("Hive")]
 [assembly: AssemblyDescription("Hive")]
 [assembly: AssemblyProduct("Hive")]
-[assembly: AssemblyVersion("0.60.0.0")]
-[assembly: AssemblyFileVersion("0.60.0.0")]
+[assembly: AssemblyVersion("0.61.0.0")]
+[assembly: AssemblyFileVersion("0.61.0.0")]
 
 namespace Hive
 {
@@ -446,7 +446,9 @@ namespace Hive
         public int CapBarRgb { get; set; }
 
         public Dictionary<string, long> PopSeen { get; set; }
-        public Settings() { PopSeen = new Dictionary<string, long>(); TabOrder = new List<string>(); Outside = new List<string>(); Parts = new List<string>(); LayoutId = "full"; Screen = ""; ContMax = true; Widths = new Dictionary<string, double>(); Open = new List<string>(); Pinned = new List<string>(); PinW = new Dictionary<string, double>(); OwnW = new Dictionary<string, double>(); AutoFolded = new List<string>(); }
+
+        public Dictionary<string, string> RestoreIds { get; set; }
+        public Settings() { RestoreIds = new Dictionary<string, string>(); PopSeen = new Dictionary<string, long>(); TabOrder = new List<string>(); Outside = new List<string>(); Parts = new List<string>(); LayoutId = "full"; Screen = ""; ContMax = true; Widths = new Dictionary<string, double>(); Open = new List<string>(); Pinned = new List<string>(); PinW = new Dictionary<string, double>(); OwnW = new Dictionary<string, double>(); AutoFolded = new List<string>(); }
         static string FilePath { get { return Path.Combine(Program.DataDir, "settings.json"); } }
         public static Settings Load()
         {
@@ -851,6 +853,52 @@ namespace Hive
         {
             using (var fs = new FileStream(p, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             using (var sr = new StreamReader(fs, Encoding.UTF8)) return sr.ReadToEnd();
+        }
+
+        public string TitleOfSession(string sid)
+        {
+            if (SessRoot == null || string.IsNullOrEmpty(sid)) return null;
+            try
+            {
+                foreach (var f in Directory.GetFiles(SessRoot, sid + ".json", SearchOption.AllDirectories))
+                {
+                    var d = new System.Web.Script.Serialization.JavaScriptSerializer { MaxJsonLength = int.MaxValue }.DeserializeObject(ReadShared(f)) as Dictionary<string, object>;
+                    if (d == null || Bool(d, "isArchived")) continue;
+                    var t = Str(d, "title"); if (!string.IsNullOrEmpty(t)) return t;
+                }
+            }
+            catch (Exception e) { Log.W("status: session name: " + e.Message); }
+            return null;
+        }
+
+        public string TitleForOldName(string old)
+        {
+            if (SessRoot == null || string.IsNullOrEmpty(old)) return null;
+            string best = null; long bestAt = -1;
+            try
+            {
+                var js2 = new System.Web.Script.Serialization.JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+                string quoted = js2.Serialize(old);
+                foreach (var f in Directory.GetFiles(SessRoot, "local_*.json", SearchOption.AllDirectories))
+                {
+                    string text = ReadShared(f);
+                    if (text.IndexOf(quoted, StringComparison.Ordinal) < 0) continue;
+                    var d = js2.DeserializeObject(text) as Dictionary<string, object>;
+                    if (d == null || Bool(d, "isArchived")) continue;
+                    var t = Str(d, "title"); if (string.IsNullOrEmpty(t) || t == old) continue;
+                    object pv; bool had = false;
+                    if (d.TryGetValue("previousTitles", out pv) && pv != null)
+                    {
+                        if (pv is string) had = (string)pv == old;
+                        else { var l = pv as System.Collections.IList; if (l != null) foreach (var o in l) if (o as string == old) had = true; }
+                    }
+                    if (!had) continue;
+                    long at = Num(d, "lastActivityAt");
+                    if (at > bestAt) { bestAt = at; best = t; }
+                }
+            }
+            catch (Exception e) { Log.W("status: earlier session name: " + e.Message); }
+            return best;
         }
         static string Str(Dictionary<string, object> d, string k) { object v; return d != null && d.TryGetValue(k, out v) && v != null ? v as string : null; }
         static long Num(Dictionary<string, object> d, string k)
@@ -1456,7 +1504,7 @@ namespace Hive
             var h = Handle;
             Start();
             if (!claude && !background) LaunchClaude();
-            Log.W("start v0.60: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
+            Log.W("start v0.61: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
         }
 
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= N.WS_EX_TOOLWINDOW | N.WS_EX_NOACTIVATE; return cp; } }
@@ -1669,6 +1717,16 @@ namespace Hive
             var missing = S.Restore.Where(k => ByKey(k) == null).ToList();
 
             if (missing.Count == 0) return;
+
+            foreach (var k in missing)
+            {
+                string sid;
+                var now = S.RestoreIds != null && S.RestoreIds.TryGetValue(k, out sid) ? SR.TitleOfSession(sid) : SR.TitleForOldName(k.Substring(2));
+                if (string.IsNullOrEmpty(now) || "t:" + now == k || S.Restore.Contains("t:" + now) || ByKey("t:" + now) != null) continue;
+                Log.W("renamed since its window closed: " + k.Substring(2) + " is now " + now + "; brought back under its new name");
+                RenameKey(k, "t:" + now);
+            }
+            missing = S.Restore.Where(k => ByKey(k) == null).ToList();
             foreach (var k in S.Restore) if (ByKey(k) == null) expected[k] = T.Now() + 90000;
             var aw = ActiveWin(); string act = aw != null ? aw.Key : null;
             var keys = S.Restore.ToList(); IntPtr mh = main.H;
@@ -1707,6 +1765,7 @@ namespace Hive
             bool ch = false;
             if (S.Restore == null) { S.Restore = new List<string>(have); ch = true; Log.W("remembers the open session windows: " + have.Count); }
             foreach (var k in have) { goneSince.Remove(k); if (!S.Restore.Contains(k)) { S.Restore.Add(k); ch = true; } }
+            if (RememberIds()) ch = true;
             long now = T.Now();
             foreach (var k in S.Restore.ToList())
             {
@@ -1717,6 +1776,16 @@ namespace Hive
                 if (now - t0 >= 5000) { S.Restore.Remove(k); goneSince.Remove(k); ch = true; Log.W("closed while Hive is open, so it is not brought back: " + k.Substring(2)); }
             }
             if (ch) S.Save();
+        }
+
+        bool RememberIds()
+        {
+            if (S.RestoreIds == null) S.RestoreIds = new Dictionary<string, string>();
+            bool ch = false;
+            foreach (var w in all.Where(x => !x.IsMain && !string.IsNullOrEmpty(x.SessionId)))
+            { string old; if (!S.RestoreIds.TryGetValue(w.Key, out old) || old != w.SessionId) { S.RestoreIds[w.Key] = w.SessionId; ch = true; } }
+            if (S.Restore != null) foreach (var k in S.RestoreIds.Keys.Where(k => !S.Restore.Contains(k)).ToList()) { S.RestoreIds.Remove(k); ch = true; }
+            return ch;
         }
         void GoHiddenNoClaude()
         {
@@ -1736,6 +1805,7 @@ namespace Hive
             var sessions = all.Where(w => !w.IsMain && N.IsWindow(w.H)).ToList();
             if (S.Restore == null) S.Restore = new List<string>();
             foreach (var w in sessions) if (!S.Restore.Contains(w.Key)) S.Restore.Add(w.Key);
+            RememberIds();
             S.Save();
             foreach (var w in ManagedWins().Where(x => x.IsMain)) { var d = StartPos(w.Title); if (d != null) Mover.Restore(w.H, d); }
             HideCap("");
@@ -2119,6 +2189,7 @@ namespace Hive
             for (int i = 0; i < S.AutoFolded.Count; i++) if (S.AutoFolded[i] == a) S.AutoFolded[i] = b;
             if (S.FocusKey == a) S.FocusKey = b;
             if (S.Restore != null) for (int i = 0; i < S.Restore.Count; i++) if (S.Restore[i] == a) S.Restore[i] = b;
+            string rid; if (S.RestoreIds != null && S.RestoreIds.TryGetValue(a, out rid)) { S.RestoreIds.Remove(a); S.RestoreIds[b] = rid; }
             for (int i = 0; i < S.Open.Count; i++) if (S.Open[i] == a) S.Open[i] = b;
             if (zoomKey == a) zoomKey = b;
             int mw0; if (minW.TryGetValue(a, out mw0)) { minW.Remove(a); minW[b] = mw0; }
