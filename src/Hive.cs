@@ -23,8 +23,8 @@ using TTimer = System.Threading.Timer;
 [assembly: AssemblyTitle("Hive")]
 [assembly: AssemblyDescription("Hive")]
 [assembly: AssemblyProduct("Hive")]
-[assembly: AssemblyVersion("0.61.0.0")]
-[assembly: AssemblyFileVersion("0.61.0.0")]
+[assembly: AssemblyVersion("0.62.0.0")]
+[assembly: AssemblyFileVersion("0.62.0.0")]
 
 namespace Hive
 {
@@ -1052,6 +1052,35 @@ namespace Hive
             catch { }
             return null;
         }
+
+        public const string NewSessionName = "New session";
+        public volatile bool HomeIsNew;
+        static readonly System.Windows.Automation.Condition newTextCond = new System.Windows.Automation.AndCondition(
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Text),
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, NewSessionName));
+
+        public static System.Windows.Automation.AutomationElement HomeNewText(IntPtr mainH)
+        {
+            try
+            {
+                var bar = System.Windows.Automation.AutomationElement.FromHandle(mainH).FindFirst(System.Windows.Automation.TreeScope.Descendants, homeBarCond);
+                if (bar == null) return null;
+                var br = bar.Current.BoundingRectangle; if (br.IsEmpty) return null;
+                var up = System.Windows.Automation.TreeWalker.ControlViewWalker.GetParent(bar);
+                for (int i = 0; i < 3 && up != null; i++, up = System.Windows.Automation.TreeWalker.ControlViewWalker.GetParent(up))
+                    foreach (System.Windows.Automation.AutomationElement e in up.FindAll(System.Windows.Automation.TreeScope.Descendants, newTextCond))
+                    {
+                        var r = e.Current.BoundingRectangle;
+                        if (!r.IsEmpty && r.Top < br.Bottom && r.Bottom > br.Top) return e;
+                    }
+            }
+            catch { }
+            return null;
+        }
+        public static string NewTextOf(System.Windows.Automation.AutomationElement e)
+        {
+            try { return e.Current.Name == NewSessionName && !e.Current.BoundingRectangle.IsEmpty ? NewSessionName : null; } catch { return null; }
+        }
         public static string TitleOf(System.Windows.Automation.AutomationElement b)
         {
             try
@@ -1132,6 +1161,8 @@ namespace Hive
                 var res = new StatusResult();
                 try
                 {
+
+                    if (w.IsMain && HomeIsNew) { res.SessionTitle = NewSessionName; res.Last = "New session page: no session yet"; o[w.H] = res; continue; }
                     SessRec r = null; string sid;
                     if (!w.IsMain && idByWin.TryGetValue(w.H, out sid)) r = byPath.Values.FirstOrDefault(x => x.Id == sid && !x.Archived);
 
@@ -1504,7 +1535,7 @@ namespace Hive
             var h = Handle;
             Start();
             if (!claude && !background) LaunchClaude();
-            Log.W("start v0.61: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
+            Log.W("start v0.62: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
         }
 
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= N.WS_EX_TOOLWINDOW | N.WS_EX_NOACTIVATE; return cp; } }
@@ -1640,7 +1671,7 @@ namespace Hive
 
         void HomeWatchLoop()
         {
-            System.Windows.Automation.AutomationElement btn = null; IntPtr btnFor = IntPtr.Zero; long nextFind = 0, missingSince = 0; string last = null;
+            System.Windows.Automation.AutomationElement btn = null; bool btnIsNew = false; IntPtr btnFor = IntPtr.Zero; long nextFind = 0, missingSince = 0; string last = null;
             while (true)
             {
                 Thread.Sleep(50);
@@ -1649,20 +1680,22 @@ namespace Hive
                     var h = homeWatchH;
                     if (h == IntPtr.Zero) { btn = null; continue; }
                     if (h != btnFor) { btn = null; btnFor = h; nextFind = 0; missingSince = 0; }
-                    string t = btn != null ? StatusReader.TitleOf(btn) : null;
+                    string t = btn == null ? null : (btnIsNew ? StatusReader.NewTextOf(btn) : StatusReader.TitleOf(btn));
                     if (t == null)
                     {
                         long now = T.Now();
                         if (missingSince == 0) missingSince = now;
                         bool fast = now - missingSince < 2000;
                         if (!fast && now < nextFind) continue;
-                        btn = StatusReader.HomeButton(h);
+                        btn = StatusReader.HomeButton(h); btnIsNew = false;
                         t = btn != null ? StatusReader.TitleOf(btn) : null;
+                        if (t == null && now - missingSince >= 100)
+                        { var nt = StatusReader.HomeNewText(h); if (nt != null) { btn = nt; btnIsNew = true; t = StatusReader.NewSessionName; } }
                         if (t == null) { if (!fast) nextFind = now + 1000; continue; }
                     }
                     missingSince = 0;
                     if (t == last) continue;
-                    last = t; SR.HomeTitleNow = t;
+                    last = t; SR.HomeIsNew = btnIsNew; SR.HomeTitleNow = t;
                     if (IsHandleCreated) BeginInvoke(new Action(delegate { HomeNameChanged(t); }));
                 }
                 catch { btn = null; }

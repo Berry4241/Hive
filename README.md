@@ -22,7 +22,7 @@ Hive doesn't replace or change Claude. Your sessions stay real Claude windows: H
 
 ## What it does
 
-**Tabs for every session.** One tab per session window, in the order you choose: drag a tab to move it. The main Claude window, the one with the sidebar, has a small home mark, so you always know where new sessions start. Its tab shows the name of the session the main window holds, and follows within a few hundredths of a second when you switch sessions there.
+**Tabs for every session.** One tab per session window, in the order you choose: drag a tab to move it. The main Claude window, the one with the sidebar, has a small home mark, so you always know where new sessions start. Its tab shows the name of the session the main window holds, and follows within a few hundredths of a second when you switch sessions there. On Claude's New session page it says "New session".
 
 **Side-by-side columns.** Open sessions stand next to each other at full height. Drag the gap between two columns to make them wider or narrower, or double-click it to make them equal again. If there isn't room for another column, the session you used longest ago folds by itself, and it comes back when there is room again.
 
