@@ -2,6 +2,10 @@
 
 **All your Claude desktop sessions in one window: tabs on top, side-by-side columns below, and every session back where you left it.**
 
+<a href="https://github.com/Berry4241/Hive/releases/latest/download/Hive.exe"><img src="docs/download-button.png" alt="Download Hive.exe" width="320"></a>
+
+For Windows 10 and 11. Before the first run, see [Download](#download): one Windows setting to turn off, and what to do if Windows warns about the file.
+
 ![Hive with three Claude Code sessions open side by side, five more folded into slim bars, and a tab for each session along the top](docs/screenshots/hive-overview.png)
 
 <sub>All screenshots use demo sessions, drawn by Hive's own drawing code. No real work is shown.</sub>
