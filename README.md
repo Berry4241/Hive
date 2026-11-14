@@ -38,6 +38,8 @@ Hive doesn't replace or change Claude. Your sessions stay real Claude windows: H
 
 ![Close-up of Hive's tab bar: a home mark on the main window's tab, a blue working dot, a pinned tab, the active tab outlined in lime, and the fold and pin marks at the end of each tab](docs/screenshots/hive-tabs.png)
 
+**Sleep for idle sessions.** Every open Claude Code session window keeps its own Claude process, about 450 MB of memory. A session with no work for 20 minutes goes to sleep: Hive closes its window, so Claude frees that memory a few minutes later, and its tab stays where it was, dimmed, with a small moon. One click on the tab wakes it: its window comes back in its place, as the session you work in. A sleeping session that starts working again (a message from your phone, a finished background task) wakes by itself.
+
 **One session at full size.** Double-click a tab, or press F11 while you're in a session, and that session fills Hive with the tabs still on top. Do it again to bring the columns back.
 
 ![One session filling Hive, with every tab still visible along the top](docs/screenshots/hive-full.png)
@@ -46,7 +48,7 @@ Hive doesn't replace or change Claude. Your sessions stay real Claude windows: H
 
 **Hive Home: its × is hidden.** The main Claude window, the one with the sidebar where new sessions start, is Hive's Home. Its tab and its folded bar carry a house mark. Its own × is hidden under a cover, so Home can't be closed by accident. If it closes another way, Hive opens it again within seconds.
 
-**Light on your PC.** Measured on a 4K screen: about 0.5 % of one CPU core while waiting in the background, about 2 % while you work, and up to about 8 % while several sessions are working at once (their marks blink). Nothing is sent anywhere.
+**Light on your PC.** Measured on a 4K screen: Hive itself uses about 50 MB of memory; about 0.5 % of one CPU core while waiting in the background, about 2 % while you work, and about 3 % more for each session that is working at once (its mark blinks). Nothing is sent anywhere.
 
 <img src="docs/screenshots/hive-folded.png" alt="Four folded sessions side by side, their names stepping down in a staircase, each with its status mark" width="240" align="right">
 
@@ -68,6 +70,7 @@ Hive doesn't touch Claude itself, only how its windows behave while they're insi
 | Home's × | hidden, so the main window can't be closed by accident |
 | Home's width | at least 960 px at 100 % scaling, because Claude shows Home's sidebar only from about 950 px |
 | a window set to stay on top | Hive turns stay-on-top off while the window is inside Hive, so the taskbar stays in front |
+| a session with no work for 20 minutes | its window closes, so Claude frees its memory; its tab stays, with a moon, and a click opens it again |
 | a folded session that Claude itself brings forward while you work in another one | stays folded, and the keyboard stays with the session you're in (Claude does this, for example, when a session uses its built-in browser) |
 | a session's maximize button □ | that session fills Hive, with the tabs still on top; press it again to go back to columns |
 | a session's minimize button – | all of Hive minimizes together, to one Hive button on the taskbar |
@@ -117,6 +120,7 @@ Either way, Hive keeps its settings and log in a `data` folder next to `Hive.exe
 | Click the ‹\|› mark, or a folded bar | the session opens as a column |
 | Click the ›\|‹ mark on a tab | the session folds into a slim bar |
 | Click the pin mark | the session stays open at its width until you unpin it |
+| Click a tab with a moon | the sleeping session wakes: its window opens again in its place |
 | Drag a tab | the tabs, and the columns, take the new order |
 | Drag the gap between columns | the columns get wider or narrower |
 | Double-click the gap | the open columns become equal |
@@ -127,6 +131,7 @@ Either way, Hive keeps its settings and log in a `data` folder next to `Hive.exe
 
 - **Finding and arranging.** Hive looks for the Claude app's windows and moves and sizes them with ordinary Windows calls. Folded sessions wait behind Hive at the width they'll open at, so switching is instant.
 - **Status.** Hive reads the Claude app's own local files, read-only: its session records under `%LOCALAPPDATA%\Claude-Data`, and the end of each session's transcript under `%USERPROFILE%\.claude\projects`. It never writes to them.
+- **Sleep.** Every 30 seconds Hive looks for session windows whose session has not worked, and that you have not used, for 20 minutes, and closes them; Claude ends the session's process by itself a few minutes after its window closes. Never put to sleep: the main window, the session you are in, the one filling Hive, or one that waits for you. A wake opens the window again the same way as bringing sessions back (below); the window is drawn behind Hive first and then comes forward in one step.
 - **Approvals.** When a session waits on a tool call, Hive looks in that window for Claude's approval card (its Deny button), through Windows UI Automation, read-only: 3, 10 and 30 seconds after the session's last activity, then once a minute. A card that is there turns the tab amber.
 - **Home's name.** Hive reads the name of the session shown in the main window from that window's own header, through Windows UI Automation, read-only. It looks 20 times a second, and each look takes about a tenth of a millisecond.
 - **Bringing sessions back.** Hive remembers which session windows were open, and each one's session, so a session you rename in Claude comes back under its new name, in its old place. When one is missing, it finds that session in Claude's sidebar through Windows UI Automation and opens it in its own window with the same Ctrl+click you would use. The click is sent to Claude as a window message, so your real mouse and keyboard are never used.
