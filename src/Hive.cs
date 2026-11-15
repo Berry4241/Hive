@@ -23,8 +23,8 @@ using TTimer = System.Threading.Timer;
 [assembly: AssemblyTitle("Hive")]
 [assembly: AssemblyDescription("Hive")]
 [assembly: AssemblyProduct("Hive")]
-[assembly: AssemblyVersion("0.65.0.0")]
-[assembly: AssemblyFileVersion("0.65.0.0")]
+[assembly: AssemblyVersion("0.67.0.0")]
+[assembly: AssemblyFileVersion("0.67.0.0")]
 
 namespace Hive
 {
@@ -143,6 +143,7 @@ namespace Hive
         public static long PaintN, PaintT, PollN, PollT, ScanN, ScanT, StatusN, StatusT, ArrangeN, ArrangeT, EvLoc, EvLocWin, EvOther, PlaceN, PlaceT, StackN, StackT;
         public static long TailReads, TailBytes, TailBig, HugeLines, RecLoads, RecBytes, StatusMax;
         public static long CardN, CardT;
+        public static long CardFullN;
 
         public static long WmN, WmT, AreaSum, AreaMax, SpT, TabT, ApplyN, ApplyT, ApplyCh, RelayN, RelayT, FullInv, StatusCpu, BigN, BigT, LastArea;
         public static long WmStart, PreT, BgT, PaintIn;
@@ -172,7 +173,7 @@ namespace Hive
                 Part("arrange", ArrangeN, ArrangeT) + " (of it: place " + Part("", PlaceN, PlaceT).Trim() + ", stack order " + Part("", StackN, StackT).Trim() + "); " +
                 "window notices: location " + EvLoc + " (" + EvLocWin + " for whole windows), other " + EvOther + "; " +
                 "status reads: transcripts " + TailReads + " (" + (TailBytes >> 20) + " MB, " + TailBig + " over 256 KB, " + HugeLines + " huge entries decoded), records " + RecLoads + " (" + (RecBytes >> 20) + " MB), slowest status " + Ms(StatusMax).ToString("0") + " ms; " +
-                Part("approval-card looks", CardN, CardT) + "; " +
+                Part("approval-card looks", CardN, CardT) + " (whole chat " + CardFullN + "); " +
                 "memory clean-ups " + (c0 - g0) + "/" + (c1 - g1) + "/" + (c2 - g2) + " (small/medium/full); private " + (pr.PrivateMemorySize64 >> 20) + " MB" + extra);
             lastAt = now; lastCpu = cpu; uiCpu0 = ui; g0 = c0; g1 = c1; g2 = c2;
 
@@ -189,7 +190,7 @@ namespace Hive
             }
             WmN = WmT = AreaSum = AreaMax = BigN = BigT = PreT = BgT = PaintIn = SpT = TabT = ApplyN = ApplyT = ApplyCh = RelayN = RelayT = FullInv = 0; Interlocked.Exchange(ref StatusCpu, 0);
             PaintN = PaintT = PollN = PollT = ScanN = ScanT = StatusN = StatusT = ArrangeN = ArrangeT = EvLoc = EvLocWin = EvOther = PlaceN = PlaceT = StackN = StackT = 0;
-            TailReads = TailBytes = TailBig = HugeLines = RecLoads = RecBytes = StatusMax = CardN = CardT = 0;
+            TailReads = TailBytes = TailBig = HugeLines = RecLoads = RecBytes = StatusMax = CardN = CardT = CardFullN = 0;
         }
     }
 
@@ -515,7 +516,11 @@ namespace Hive
             if (TabOrder.Count > 300) TabOrder = TabOrder.Skip(TabOrder.Count - 300).ToList();
 
             if (!TabOrder.Contains("main")) TabOrder.Insert(0, "main");
+            DedupeAll();
         }
+
+        public void DedupeAll() { foreach (var l in new[] { TabOrder, Outside, Parts, Open, Pinned, AutoFolded, Sleeping, Restore }) Dedupe(l); }
+        static void Dedupe(List<string> l) { if (l == null) return; var had = new HashSet<string>(); l.RemoveAll(x => !had.Add(x ?? "")); }
         public void Save()
         {
             try
@@ -1136,7 +1141,9 @@ namespace Hive
             return null;
         }
 
-        class CardCheck { public long Len; public int N; public long LastAt, PanelAt; public bool Found, Recheck; public System.Windows.Automation.AutomationElement Panel; }
+        const int CardTail = 6;
+        class CardCheck { public long Len; public int N; public long LastAt, PanelAt; public bool Found, Recheck, FoundTail, OutsideLogged; public System.Windows.Automation.AutomationElement Panel, Chat; }
+        static readonly System.Windows.Automation.TreeWalker Walk = System.Windows.Automation.TreeWalker.ControlViewWalker;
 
         static readonly long[] CardLookAt = { 3000, 10000, 30000 };
         static readonly System.Windows.Automation.Condition denyCond = new System.Windows.Automation.AndCondition(
@@ -1158,47 +1165,71 @@ namespace Hive
             bool due = c.Recheck || (c.Found ? now - c.LastAt >= 15000 : (c.N < CardLookAt.Length ? quiet >= CardLookAt[c.N] : now - c.LastAt >= 60000));
             if (!due) return c.Found;
             long t0 = Perf.Now();
-            bool found = FindCard(w.H, c);
-            Perf.CardN++; Perf.CardT += Perf.Now() - t0;
+            bool full = quiet >= 30000 || (c.Found && !c.FoundTail);
+            bool found = FindCard(w.H, c, w.IsMain, full);
+            if (!found && !full && c.Found) { found = FindCard(w.H, c, w.IsMain, true); full = true; }
+            long took = Perf.Now() - t0;
+            Perf.CardN++; if (full) Perf.CardFullN++; Perf.CardT += took;
+
+            if (Perf.Ms(took) >= 80) Log.W("slow: approval-card look " + Perf.Ms(took).ToString("0") + " ms in " + (w.Label ?? w.Title) + " (" + (full ? "whole chat" : "newest rows") +
+                (c.LastAt == 0 ? ", first look in this window" : "") + (c.PanelAt >= now ? ", chat part found again" : "") + ")");
             c.LastAt = now; c.Recheck = false;
             while (c.N < CardLookAt.Length && CardLookAt[c.N] <= quiet) c.N++;
             if (found != c.Found) Log.W((found ? "approval card on screen: " : "approval card gone: ") + (w.Label ?? w.Title) + " (look " + Perf.Ms(Perf.Now() - t0).ToString("0") + " ms)");
             c.Found = found;
             return found;
         }
-        static bool FindCard(IntPtr h, CardCheck c)
+        static bool FindCard(IntPtr h, CardCheck c, bool isMain, bool full)
         {
             for (int attempt = 0; attempt < 2; attempt++)
             {
                 try
                 {
                     long now = T.Now();
-                    if (c.Panel == null || now - c.PanelAt > 20000)
+
+                    if (c.Chat == null || now - c.PanelAt > (isMain ? 20000 : 120000))
                     {
                         var chat = System.Windows.Automation.AutomationElement.FromHandle(h).FindFirst(System.Windows.Automation.TreeScope.Descendants, chatCond);
-                        if (chat == null) { c.Panel = null; return false; }
-                        c.Panel = System.Windows.Automation.TreeWalker.ControlViewWalker.GetParent(chat) ?? chat; c.PanelAt = now;
+                        if (chat == null) { c.Chat = c.Panel = null; return false; }
+                        c.Chat = chat; c.Panel = Walk.GetParent(chat) ?? chat; c.PanelAt = now;
                     }
-                    var d = c.Panel.FindFirst(System.Windows.Automation.TreeScope.Descendants, denyCond);
-                    if (d == null) { var alive = c.Panel.Current.ControlType; return false; }
-                    var card = System.Windows.Automation.TreeWalker.ControlViewWalker.GetParent(d);
+                    var d = full ? c.Panel.FindFirst(System.Windows.Automation.TreeScope.Descendants, denyCond) : TailDeny(c.Chat);
+                    if (d == null) { var alive = c.Chat.Current.ControlType; return false; }
+                    var card = Walk.GetParent(d);
                     string n = card != null ? (card.Current.Name ?? "") : "";
-                    if (n.StartsWith("Permission request", StringComparison.Ordinal)) return true;
+                    bool isCard = n.StartsWith("Permission request", StringComparison.Ordinal);
 
-                    foreach (System.Windows.Automation.AutomationElement b in (card ?? c.Panel).FindAll(System.Windows.Automation.TreeScope.Descendants, homeBtnCond))
-                        if ((b.Current.Name ?? "").StartsWith("Allow", StringComparison.Ordinal)) return true;
-                    return false;
+                    if (!isCard)
+                        foreach (System.Windows.Automation.AutomationElement b in (card ?? c.Panel).FindAll(System.Windows.Automation.TreeScope.Descendants, homeBtnCond))
+                            if ((b.Current.Name ?? "").StartsWith("Allow", StringComparison.Ordinal)) { isCard = true; break; }
+                    if (!isCard) return false;
+                    c.FoundTail = !full || TailDeny(c.Chat) != null;
+                    if (!c.FoundTail && !c.OutsideLogged) { c.OutsideLogged = true; Log.W("approval card outside the newest " + CardTail + " rows of the chat: found by a whole look only (" + (n.Length > 0 ? n : "a Deny button") + ")"); }
+                    return true;
                 }
-                catch { c.Panel = null; }
+                catch { c.Chat = c.Panel = null; }
             }
             return false;
+        }
+
+        static System.Windows.Automation.AutomationElement TailDeny(System.Windows.Automation.AutomationElement chat)
+        {
+            var e = Walk.GetLastChild(chat);
+            for (int i = 0; e != null && i < CardTail; i++)
+            {
+                var d = e.FindFirst(System.Windows.Automation.TreeScope.Subtree, denyCond);
+                if (d != null) return d;
+                e = Walk.GetPreviousSibling(e);
+            }
+            return null;
         }
         public Dictionary<IntPtr, StatusResult> Read(IList<Win> wins)
         {
             LoadSessions();
 
-            if (idByWin.Count > wins.Count) { var live = new HashSet<IntPtr>(wins.Select(x => x.H)); foreach (var k in idByWin.Keys.Where(k => !live.Contains(k)).ToList()) idByWin.Remove(k); }
-            if (cards.Count > wins.Count) { var live = new HashSet<IntPtr>(wins.Select(x => x.H)); foreach (var k in cards.Keys.Where(k => !live.Contains(k)).ToList()) cards.Remove(k); }
+            { var live = new HashSet<IntPtr>(wins.Select(x => x.H));
+              foreach (var k in idByWin.Keys.Where(k => !live.Contains(k)).ToList()) idByWin.Remove(k);
+              foreach (var k in cards.Keys.Where(k => !live.Contains(k)).ToList()) cards.Remove(k); }
             var o = new Dictionary<IntPtr, StatusResult>();
             foreach (var w in wins)
             {
@@ -1619,7 +1650,7 @@ namespace Hive
             Start();
             if (!claude && !background) LaunchClaude();
             if (SleepAfterMs != 20L * 60 * 1000 || SleepOnly != null || SleepWakeTestMs > 0) Log.W("TEST SETTINGS: sleep after " + (SleepAfterMs / 60000) + " min" + (SleepOnly != null ? ", only " + SleepOnly : "") + (SleepWakeTestMs > 0 ? ", wake by itself after " + (SleepWakeTestMs / 1000) + " s" : ""));
-            Log.W("start v0.65: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
+            Log.W("start v0.67: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
         }
 
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= N.WS_EX_TOOLWINDOW | N.WS_EX_NOACTIVATE; return cp; } }
@@ -1920,6 +1951,8 @@ namespace Hive
                 string sid;
                 var now = S.RestoreIds != null && S.RestoreIds.TryGetValue(k, out sid) ? SR.TitleOfSession(sid) : SR.TitleForOldName(k.Substring(2));
                 if (string.IsNullOrEmpty(now) || "t:" + now == k || S.Restore.Contains("t:" + now) || ByKey("t:" + now) != null) continue;
+
+                if (S.Sleeping.Contains("t:" + now)) { Log.W("not renamed: " + k.Substring(2) + " was remembered with the session of " + now + ", which has a tab of its own; brought back by its own name"); continue; }
                 Log.W("renamed since its window closed: " + k.Substring(2) + " is now " + now + "; brought back under its new name");
                 RenameKey(k, "t:" + now);
             }
@@ -2448,6 +2481,8 @@ namespace Hive
         bool maxPending;
         void RenameKey(string a, string b)
         {
+
+            if (S.TabOrder.Contains(a)) S.TabOrder.RemoveAll(x => x == b);
             for (int i = 0; i < S.TabOrder.Count; i++) if (S.TabOrder[i] == a) S.TabOrder[i] = b;
             for (int i = 0; i < S.Parts.Count; i++) if (S.Parts[i] == a) S.Parts[i] = b;
             for (int i = 0; i < S.Outside.Count; i++) if (S.Outside[i] == a) S.Outside[i] = b;
@@ -2469,6 +2504,7 @@ namespace Hive
             if (zoomKey == a) zoomKey = b;
             int mw0; if (minW.TryGetValue(a, out mw0)) { minW.Remove(a); minW[b] = mw0; }
             if (focusPending == a) focusPending = b;
+            S.DedupeAll();
             S.Save();
         }
 
