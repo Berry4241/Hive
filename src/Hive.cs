@@ -23,8 +23,8 @@ using TTimer = System.Threading.Timer;
 [assembly: AssemblyTitle("Hive")]
 [assembly: AssemblyDescription("Hive")]
 [assembly: AssemblyProduct("Hive")]
-[assembly: AssemblyVersion("0.67.0.0")]
-[assembly: AssemblyFileVersion("0.67.0.0")]
+[assembly: AssemblyVersion("0.80.0.0")]
+[assembly: AssemblyFileVersion("0.80.0.0")]
 
 namespace Hive
 {
@@ -329,6 +329,29 @@ namespace Hive
             using (var b = new SolidBrush(bg)) g.FillEllipse(b, cx - d2 / 2 + 3.2f * sc, cy - d2 / 2 - 2.0f * sc, d2, d2);
             g.Restore(st);
         }
+
+        public static void MoonMark(Graphics g, float cx, float cy, float sc, Color c, bool set)
+        {
+            var st = g.Save(); g.SmoothingMode = SmoothingMode.AntiAlias;
+            float r = 5.6f * sc, r2 = r * 0.8f, ox = 3.6f * sc, oy = -2.6f * sc;
+            using (var a = new GraphicsPath()) using (var b = new GraphicsPath())
+            {
+                a.AddEllipse(cx - r, cy - r, 2 * r, 2 * r);
+                b.AddEllipse(cx + ox - r2, cy + oy - r2, 2 * r2, 2 * r2);
+                if (set)
+                {
+                    g.SetClip(a); g.ExcludeClip(new Region(b));
+                    using (var br = new SolidBrush(c)) g.FillEllipse(br, cx - r, cy - r, 2 * r, 2 * r);
+                }
+                else using (var p = new Pen(c, 1.2f * sc))
+                {
+                    g.SetClip(new Rectangle(-100000, -100000, 200000, 200000)); g.ExcludeClip(new Region(b));
+                    g.DrawPath(p, a);
+                    g.SetClip(a); g.DrawPath(p, b);
+                }
+            }
+            g.Restore(st);
+        }
         public static void StatusDot(Graphics g, St st, float x, float cy, float sc, float alpha, float size = 8)
         {
             float d = size * sc; var r = new RectangleF(x, cy - d / 2, d, d);
@@ -457,6 +480,10 @@ namespace Hive
         public List<string> Open { get; set; }
         public string FocusKey { get; set; }
         public int FocusW { get; set; }
+
+        public int Columns { get; set; }
+
+        public Dictionary<string, double> ColW { get; set; }
         public string Screen { get; set; }
         public List<string> Pinned { get; set; }
         public Dictionary<string, double> PinW { get; set; }
@@ -475,7 +502,9 @@ namespace Hive
         public List<string> Sleeping { get; set; }
         public Dictionary<string, string> SleepNames { get; set; }
         public Dictionary<string, string> SleepIds { get; set; }
-        public Settings() { Sleeping = new List<string>(); SleepNames = new Dictionary<string, string>(); SleepIds = new Dictionary<string, string>(); RestoreIds = new Dictionary<string, string>(); PopSeen = new Dictionary<string, long>(); TabOrder = new List<string>(); Outside = new List<string>(); Parts = new List<string>(); LayoutId = "full"; Screen = ""; ContMax = true; Widths = new Dictionary<string, double>(); Open = new List<string>(); Pinned = new List<string>(); PinW = new Dictionary<string, double>(); OwnW = new Dictionary<string, double>(); AutoFolded = new List<string>(); }
+
+        public Dictionary<string, int> SleepAfter { get; set; }
+        public Settings() { SleepAfter = new Dictionary<string, int>(); Sleeping = new List<string>(); SleepNames = new Dictionary<string, string>(); SleepIds = new Dictionary<string, string>(); RestoreIds = new Dictionary<string, string>(); PopSeen = new Dictionary<string, long>(); TabOrder = new List<string>(); Outside = new List<string>(); Parts = new List<string>(); LayoutId = "full"; Screen = ""; ContMax = true; Widths = new Dictionary<string, double>(); Open = new List<string>(); Pinned = new List<string>(); PinW = new Dictionary<string, double>(); OwnW = new Dictionary<string, double>(); AutoFolded = new List<string>(); }
         static string FilePath { get { return Path.Combine(Program.DataDir, "settings.json"); } }
         public static Settings Load()
         {
@@ -506,6 +535,8 @@ namespace Hive
             if (PinW == null) PinW = new Dictionary<string, double>();
             if (OwnW == null) OwnW = new Dictionary<string, double>();
             if (AutoFolded == null) AutoFolded = new List<string>();
+            if (SleepAfter == null) SleepAfter = new Dictionary<string, int>();
+            if (ColW == null) ColW = new Dictionary<string, double>();
             if (Restore != null) { Restore = Restore.Where(k => !string.IsNullOrEmpty(k) && k.StartsWith("t:")).Distinct().ToList(); if (Restore.Count > 60) Restore = Restore.Skip(Restore.Count - 60).ToList(); }
             foreach (var kv in PinW) if (!OwnW.ContainsKey(kv.Key)) OwnW[kv.Key] = kv.Value;
             PinW.Clear();
@@ -593,23 +624,168 @@ namespace Hive
             try { return root.FindFirst(System.Windows.Automation.TreeScope.Descendants, cond); } catch { return null; }
         }
 
-        static System.Windows.Automation.AutomationElement Row(System.Windows.Automation.AutomationElement root, string title)
+        static readonly System.Windows.Automation.Condition rowType = new System.Windows.Automation.OrCondition(
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Hyperlink),
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Button));
+        static readonly System.Windows.Automation.Condition linkType =
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Hyperlink);
+        static string rowHow;
+
+        static System.Windows.Automation.AutomationElement Scope(System.Windows.Automation.AutomationElement root)
         {
-            var more = Button(root, "More options for " + title);
-            if (more == null) return null;
-            var mr = more.Current.BoundingRectangle;
+            try
+            {
+                var cond = new System.Windows.Automation.AndCondition(
+                    new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, "Sidebar"),
+                    new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.LocalizedControlTypeProperty, "complementary"));
+                var sb = root.FindFirst(System.Windows.Automation.TreeScope.Descendants, cond);
+                if (sb != null && !sb.Current.BoundingRectangle.IsEmpty) return sb;
+            }
+            catch { }
+            return root;
+        }
+
+        static System.Windows.Automation.AutomationElement MoreBtn(System.Windows.Automation.AutomationElement scope, string title)
+        {
             var cond = new System.Windows.Automation.AndCondition(
-                new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, title),
+                new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, "More options for " + title),
                 new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Button));
+            System.Windows.Automation.AutomationElement best = null; double bx = double.MaxValue;
+            try
+            {
+                foreach (System.Windows.Automation.AutomationElement e in scope.FindAll(System.Windows.Automation.TreeScope.Descendants, cond))
+                { try { var r = e.Current.BoundingRectangle; if (!r.IsEmpty && r.Left < bx) { bx = r.Left; best = e; } } catch { } }
+            }
+            catch { }
+            return best;
+        }
+
+        static System.Windows.Automation.AutomationElement OnLine(System.Windows.Automation.AutomationElement scope, System.Windows.Automation.AutomationElement more, string title, bool anyName)
+        {
+            System.Windows.Rect mr;
+            try { mr = more.Current.BoundingRectangle; } catch { return null; }
+            if (mr.IsEmpty) return null;
+            double mid = mr.Top + mr.Height / 2;
             System.Windows.Automation.AutomationElementCollection rows;
-            try { rows = root.FindAll(System.Windows.Automation.TreeScope.Descendants, cond); } catch { return null; }
+            try { rows = scope.FindAll(System.Windows.Automation.TreeScope.Descendants, anyName ? linkType : rowType); } catch { return null; }
+            System.Windows.Automation.AutomationElement found = null; int n = 0;
             foreach (System.Windows.Automation.AutomationElement e in rows)
             {
-                var r = e.Current.BoundingRectangle;
-                if (r.IsEmpty || mr.IsEmpty) continue;
-                if (r.Top <= mr.Top + mr.Height / 2 && r.Bottom >= mr.Top + mr.Height / 2 && r.Left < mr.Left) return e;
+                string nm; System.Windows.Rect r;
+                try { nm = e.Current.Name; r = e.Current.BoundingRectangle; } catch { continue; }
+                if (r.IsEmpty || !(r.Top <= mid && r.Bottom >= mid && r.Left < mr.Left)) continue;
+                if (!anyName && (nm == null || !(nm == title || nm.StartsWith(title + " ", StringComparison.Ordinal)))) continue;
+                if (!anyName) return e;
+                found = e; n++;
+            }
+            return n == 1 ? found : null;
+        }
+
+        static System.Windows.Automation.AutomationElement ByName(System.Windows.Automation.AutomationElement scope, string title)
+        {
+            try
+            {
+                foreach (System.Windows.Automation.AutomationElement e in scope.FindAll(System.Windows.Automation.TreeScope.Descendants, linkType))
+                {
+                    try
+                    {
+                        var n = e.Current.Name; var r = e.Current.BoundingRectangle;
+                        if ((n == title || n == title + " Running") && !r.IsEmpty && r.Width >= 40) return e;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            return null;
+        }
+        static System.Windows.Automation.AutomationElement Row(System.Windows.Automation.AutomationElement root, string title)
+        {
+            var scope = Scope(root);
+            var more = MoreBtn(scope, title);
+            if (more == null) { var byName = ByName(scope, title); if (byName != null) rowHow = "by its name alone (no More options button)"; return byName; }
+            var row = OnLine(scope, more, title, false);
+            if (row != null) return row;
+            row = OnLine(scope, more, title, true);
+            if (row != null) rowHow = "as the one link on its More options line (its name no longer matches)";
+            return row;
+        }
+
+        static bool MenuOpen(System.Windows.Automation.AutomationElement root, string title)
+        {
+            bool showedSidebar = false;
+            try
+            {
+                var more = MoreBtn(Scope(root), title);
+                if (more == null)
+                {
+                    var show = Button(root, "Show sidebar");
+                    if (show == null) return false;
+                    try { ((System.Windows.Automation.ExpandCollapsePattern)show.GetCurrentPattern(System.Windows.Automation.ExpandCollapsePattern.Pattern)).Expand(); showedSidebar = true; } catch { return false; }
+                    for (int i = 0; i < 6 && more == null; i++) { Thread.Sleep(250); more = MoreBtn(Scope(root), title); }
+                    if (more == null) return false;
+                }
+                if (!Press(more)) return false;
+
+                var openIn = MenuItem(root, "Open in", 8);
+                if (openIn != null && Press(openIn))
+                {
+                    var nw = MenuItem(root, "New window", 8);
+                    if (nw != null && Press(nw)) return true;
+                }
+                else
+                {
+                    var one = MenuItem(root, "Open in new window", 2);
+                    if (one != null && Press(one)) return true;
+                }
+                Escape(root);
+                return false;
+            }
+            catch { Escape(root); return false; }
+            finally
+            {
+                if (showedSidebar) { Thread.Sleep(300); var hide = Button(root, "Hide sidebar"); if (hide != null) Press(hide); }
+            }
+        }
+        static System.Windows.Automation.AutomationElement MenuItem(System.Windows.Automation.AutomationElement root, string name, int looks)
+        {
+            var cond = new System.Windows.Automation.AndCondition(
+                new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.NameProperty, name),
+                new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.MenuItem));
+            for (int i = 0; i < looks; i++)
+            {
+                Thread.Sleep(150);
+                try { var e = root.FindFirst(System.Windows.Automation.TreeScope.Descendants, cond); if (e != null) return e; } catch { }
             }
             return null;
+        }
+        static void Escape(System.Windows.Automation.AutomationElement root)
+        {
+            try
+            {
+                var h = (IntPtr)root.Current.NativeWindowHandle;
+                for (int k = 0; k < 2; k++) { N.PostMessage(h, 0x100, (IntPtr)0x1B, (IntPtr)0x00010001); N.PostMessage(h, 0x101, (IntPtr)0x1B, unchecked((IntPtr)(int)0xC0010001)); Thread.Sleep(200); }
+            }
+            catch { }
+        }
+        static bool Press(System.Windows.Automation.AutomationElement e)
+        {
+            try { ((System.Windows.Automation.InvokePattern)e.GetCurrentPattern(System.Windows.Automation.InvokePattern.Pattern)).Invoke(); return true; } catch { }
+            try { ((System.Windows.Automation.ExpandCollapsePattern)e.GetCurrentPattern(System.Windows.Automation.ExpandCollapsePattern.Pattern)).Expand(); return true; } catch { }
+            return false;
+        }
+
+        static bool AnyRows(System.Windows.Automation.AutomationElement root)
+        {
+            try
+            {
+                var scope = Scope(root);
+                if (scope != root && scope.FindFirst(System.Windows.Automation.TreeScope.Descendants, linkType) != null) return true;
+                var cond = new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.ControlTypeProperty, System.Windows.Automation.ControlType.Button);
+                foreach (System.Windows.Automation.AutomationElement e in scope.FindAll(System.Windows.Automation.TreeScope.Descendants, cond))
+                { try { var n = e.Current.Name; if (n != null && n.StartsWith("More options for ", StringComparison.Ordinal)) return true; } catch { } }
+            }
+            catch { }
+            return false;
         }
         static void CtrlClick(IntPtr mainH, System.Windows.Rect r)
         {
@@ -621,7 +797,16 @@ namespace Hive
             N.PostMessage(mainH, WM_LBUTTONUP, (IntPtr)MK_CONTROL, l);
         }
 
-        public static void Run(IntPtr mainH, List<string> keys, bool waitForClaude, Action<string> log, Action restack = null, Action<bool> freeze = null)
+        static readonly System.Windows.Automation.Condition dialogCond = new System.Windows.Automation.OrCondition(
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.LocalizedControlTypeProperty, "dialog"),
+            new System.Windows.Automation.PropertyCondition(System.Windows.Automation.AutomationElement.LocalizedControlTypeProperty, "alert dialog"));
+        public static string DialogName(System.Windows.Automation.AutomationElement root)
+        {
+            try { var d = root.FindFirst(System.Windows.Automation.TreeScope.Descendants, dialogCond); return d == null ? null : (string.IsNullOrEmpty(d.Current.Name) ? "a dialog" : d.Current.Name); }
+            catch { return null; }
+        }
+
+        public static string Run(IntPtr mainH, List<string> keys, bool waitForClaude, Action<string> log, Action restack = null, Action<bool> freeze = null, Func<bool, bool> wide = null)
         {
             var sw = Stopwatch.StartNew();
             if (waitForClaude)
@@ -629,7 +814,7 @@ namespace Hive
                 int last = -1; long stableSince = 0;
                 while (sw.ElapsedMilliseconds < 40000)
                 {
-                    if (Cancel) { log("bringing back stopped: Hive was closed"); return; }
+                    if (Cancel) { log("bringing back stopped: Hive was closed"); return null; }
                     int n = Finder.Find().Count;
                     if (n != last) { last = n; stableSince = sw.ElapsedMilliseconds; }
                     else if (sw.ElapsedMilliseconds - stableSince >= 4000 && sw.ElapsedMilliseconds >= 8000) break;
@@ -639,44 +824,86 @@ namespace Hive
             }
             var have = OpenTitles();
             var missing = keys.Where(k => k.StartsWith("t:") && !have.Contains(k.Substring(2))).Select(k => k.Substring(2)).ToList();
-            if (missing.Count == 0) { log("bringing back: nothing is missing"); return; }
-            if (!N.IsWindow(mainH)) { log("bringing back: the main Claude window is gone"); return; }
+            if (missing.Count == 0) { log("bringing back: nothing is missing"); return null; }
+            if (!N.IsWindow(mainH)) { log("bringing back: the main Claude window is gone"); return null; }
             log("bringing back " + missing.Count + " session windows: " + string.Join(", ", missing));
             var root = System.Windows.Automation.AutomationElement.FromHandle(mainH);
+            bool widened = wide != null && wide(true);
+            if (widened) Thread.Sleep(450);
 
             System.Windows.Automation.AutomationElement show = null; bool shown = false;
             for (int i = 0; i < 32 && show == null && !shown; i++)
             {
                 show = Button(root, "Show sidebar");
                 if (show == null) shown = Button(root, "Hide sidebar") != null;
-                if (show == null && !shown) Thread.Sleep(250);
+                if (show == null && !shown)
+                {
+
+                    if (i % 4 == 0) { var dn = DialogName(root); if (dn != null) { log("bringing back: a dialog is open in Claude's main window (" + dn + "); Claude hides its sidebar from Hive while it is open (" + sw.ElapsedMilliseconds + " ms)"); return dn; } }
+                    Thread.Sleep(250);
+                }
             }
-            if (show == null && !shown) { log("bringing back: Claude's sidebar was not found (" + sw.ElapsedMilliseconds + " ms)"); return; }
+            if (show == null && !shown) { log("bringing back: Claude's sidebar was not found, and no dialog was seen (" + sw.ElapsedMilliseconds + " ms)"); return null; }
             bool opened = false, frozen = false;
             if (show != null)
             {
                 if (freeze != null && missing.Count == 1) { freeze(true); frozen = true; }
-                try { ((System.Windows.Automation.ExpandCollapsePattern)show.GetCurrentPattern(System.Windows.Automation.ExpandCollapsePattern.Pattern)).Expand(); opened = true; }
-                catch (Exception e) { if (frozen) freeze(false); log("bringing back: the sidebar did not open: " + e.Message); return; }
+                Exception last = null;
+                for (int k = 0; k < (widened ? 6 : 1) && !opened; k++)
+                {
+                    try { ((System.Windows.Automation.ExpandCollapsePattern)show.GetCurrentPattern(System.Windows.Automation.ExpandCollapsePattern.Pattern)).Expand(); opened = true; }
+                    catch (Exception e) { last = e; Thread.Sleep(200); show = Button(root, "Show sidebar") ?? show; }
+                }
+                if (!opened)
+                {
+                    if (frozen) freeze(false);
+                    N.RECT mr; N.GetWindowRect(mainH, out mr);
+                    log("bringing back: the sidebar did not open (the main window is " + (mr.R - mr.L) + " px wide; Claude opens it from about 950 px): " + (last != null ? last.Message : "")); return null;
+                }
 
                 if (restack != null) { Thread.Sleep(60); restack(); }
                 for (int i = 0; i < 9; i++) { Thread.Sleep(100); if (Row(root, missing[0]) != null) break; }
                 if (restack != null) restack();
             }
-            int back = 0;
+            int back = 0, unread = 0, tried = 0; rowHow = null;
             foreach (var t in missing)
             {
                 if (Cancel) { log("bringing back stopped: Hive was closed"); break; }
                 var t0 = sw.ElapsedMilliseconds;
                 System.Windows.Automation.AutomationElement row = null;
-                for (int i = 0; i < 6 && row == null; i++) { row = Row(root, t); if (row == null) Thread.Sleep(300); }
-                if (row == null) { log("not brought back: " + t + " (not in Claude's sidebar)"); continue; }
-                bool needScroll = true;
-                try { var r0 = row.Current.BoundingRectangle; needScroll = r0.IsEmpty || r0.Width < 20; } catch { }
-                if (needScroll) try { ((System.Windows.Automation.ScrollItemPattern)row.GetCurrentPattern(System.Windows.Automation.ScrollItemPattern.Pattern)).ScrollIntoView(); Thread.Sleep(250); } catch { }
-                var r = row.Current.BoundingRectangle;
-                if (r.IsEmpty || r.Width < 20) { log("not brought back: " + t + " (its row is not on screen)"); continue; }
-                CtrlClick(mainH, r);
+
+                int looks = tried++ == 0 ? 6 : 2;
+                for (int i = 0; i < looks && row == null; i++) { row = Row(root, t); if (row == null) Thread.Sleep(300); }
+                bool viaMenu = false;
+                if (row == null && MenuOpen(root, t))
+                {
+                    viaMenu = true;
+                    log("bringing back: " + t + " opened by Claude's own Open in new window (its row could not be read; Claude's sidebar has changed again; it still works)");
+                }
+                if (row == null && !viaMenu)
+                {
+
+                    if (MoreBtn(Scope(root), t) != null) { unread++; log("not brought back: " + t + " (it is in Claude's sidebar, but Hive cannot read its row: Claude has changed its sidebar)"); }
+                    else if (back == 0 && !AnyRows(root)) { unread++; log("not brought back: " + t + " (Claude's sidebar shows no session rows that Hive can read)"); }
+                    else log("not brought back: " + t + " (not in Claude's sidebar)");
+                    if (unread >= 2 && back == 0) { log("bringing back stopped: Hive cannot read Claude's sidebar; the sessions stay on Hive's list"); break; }
+                    continue;
+                }
+                if (!viaMenu)
+                {
+                    if (rowHow != null) { log("bringing back: " + t + "'s row found " + rowHow + " (Claude's sidebar has changed again; it still works)"); rowHow = null; }
+                    bool needScroll = true;
+                    try { var r0 = row.Current.BoundingRectangle; needScroll = r0.IsEmpty || r0.Width < 20; } catch { }
+                    if (needScroll) try { ((System.Windows.Automation.ScrollItemPattern)row.GetCurrentPattern(System.Windows.Automation.ScrollItemPattern.Pattern)).ScrollIntoView(); Thread.Sleep(250); } catch { }
+                    System.Windows.Rect r = System.Windows.Rect.Empty;
+                    try { r = row.Current.BoundingRectangle; } catch { }
+                    if (r.IsEmpty || r.Width < 20)
+                    {
+                        if (!MenuOpen(root, t)) { log("not brought back: " + t + " (its row is not on screen)"); continue; }
+                        viaMenu = true; log("bringing back: " + t + " opened by Claude's own Open in new window (its row is not on screen)");
+                    }
+                    else CtrlClick(mainH, r);
+                }
                 if (restack != null) { Thread.Sleep(100); restack(); }
 
                 if (opened && missing.Count == 1)
@@ -685,11 +912,18 @@ namespace Hive
                     var hide1 = Button(root, "Hide sidebar");
                     try { if (hide1 != null) { ((System.Windows.Automation.InvokePattern)hide1.GetCurrentPattern(System.Windows.Automation.InvokePattern.Pattern)).Invoke(); opened = false; } } catch { }
                     if (restack != null) { Thread.Sleep(100); restack(); }
+                    if (widened) { wide(false); widened = false; }
                     if (frozen) { Thread.Sleep(350); freeze(false); frozen = false; }
                 }
                 bool ok = false;
-                for (int i = 0; i < 40 && !ok; i++) { Thread.Sleep(200); ok = OpenTitles().Contains(t); }
-                if (ok) { back++; log("brought back: " + t + " in " + (sw.ElapsedMilliseconds - t0) + " ms"); }
+                for (int i = 0; i < (viaMenu ? 40 : 25) && !ok; i++) { Thread.Sleep(200); ok = OpenTitles().Contains(t); }
+
+                if (!ok && !viaMenu && MenuOpen(root, t))
+                {
+                    viaMenu = true; log("bringing back: " + t + ": no window 5 s after the Ctrl-click; Claude's own Open in new window used");
+                    for (int i = 0; i < 40 && !ok; i++) { Thread.Sleep(200); ok = OpenTitles().Contains(t); }
+                }
+                if (ok) { back++; log("brought back: " + t + " in " + (sw.ElapsedMilliseconds - t0) + " ms" + (viaMenu ? " (by Claude's Open in new window)" : "")); }
                 else log("not brought back: " + t + " (no window came within 8 s)");
             }
             if (opened)
@@ -705,6 +939,7 @@ namespace Hive
             }
             if (frozen) freeze(false);
             log("bringing back: " + back + " of " + missing.Count + " back in " + sw.ElapsedMilliseconds + " ms");
+            return null;
         }
     }
 
@@ -758,8 +993,11 @@ namespace Hive
         {
             var tw = Stopwatch.StartNew(); try { PlaceCore(h, target, after); } finally { Perf.PlaceN++; Perf.PlaceT += tw.ElapsedTicks; if (tw.ElapsedMilliseconds >= 30) Perf.ArrangeDetail.Append(" place " + Finder.Title(h) + " " + tw.ElapsedMilliseconds + " ms;"); Slow("place", h, tw); }
         }
+
+        public static IntPtr Hold = IntPtr.Zero;
         static void PlaceCore(IntPtr h, Rectangle target, IntPtr after)
         {
+            if (h != IntPtr.Zero && h == Hold) { if (after != N.KEEP_Z) N.SetWindowPos(h, after, 0, 0, 0, 0, N.SWP_NOMOVE | N.SWP_NOSIZE | N.SWP_NOACTIVATE | N.SWP_NOOWNERZORDER); return; }
             if (N.IsZoomed(h)) N.ShowWindow(h, N.SW_RESTORE);
             else if (N.IsIconic(h)) N.ShowWindow(h, N.SW_SHOWNOACTIVATE);
             for (int pass = 0; pass < 2; pass++)
@@ -789,7 +1027,7 @@ namespace Hive
             foreach (var kv in items)
             {
                 IntPtr h = kv.Key; var t = kv.Value;
-                if (h == IntPtr.Zero) continue;
+                if (h == IntPtr.Zero || h == Hold) continue;
                 if (N.IsZoomed(h) || N.IsIconic(h)) { Place(h, t, N.KEEP_Z); continue; }
                 N.RECT wr, fr; N.GetWindowRect(h, out wr);
                 int ml = 0, mt = 0, mr = 0, mb = 0;
@@ -1261,6 +1499,11 @@ namespace Hive
                             int bg = BackgroundAgents(p);
                             if (bg > 0) { res.State = St.Working; res.Last = bg + " background agent(s) still working; the turn itself has ended"; }
                         }
+                        if (res.State == St.Done || res.State == St.Idle)
+                        {
+                            int cmd = BackgroundCommands(r);
+                            if (cmd > 0) { res.State = St.Working; res.Last = cmd + " background command(s) still running; the turn itself has ended"; }
+                        }
                     }
                 }
                 catch (Exception e) { res.Last = "error: " + e.Message; }
@@ -1368,6 +1611,47 @@ namespace Hive
             catch (Exception e) { Log.W("status: finish notices: " + e.Message); }
             finishNotices[transcript] = new KeyValuePair<long, HashSet<string>>(fi.Length, ids);
             return ids;
+        }
+
+        readonly HashSet<string> taskEnded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        readonly Dictionary<string, KeyValuePair<DateTime, int>> cmdCheck = new Dictionary<string, KeyValuePair<DateTime, int>>(StringComparer.OrdinalIgnoreCase);
+        string[] taskTops = new string[0]; DateTime taskTopsAt = DateTime.MinValue;
+        int BackgroundCommands(SessRec r)
+        {
+            string key = (r.Cli ?? "") + "|" + (r.Cli2 ?? "");
+            KeyValuePair<DateTime, int> c;
+            if (cmdCheck.TryGetValue(key, out c) && (DateTime.UtcNow - c.Key).TotalSeconds < 3) return c.Value;
+            if ((DateTime.UtcNow - taskTopsAt).TotalSeconds >= 60)
+            {
+                taskTopsAt = DateTime.UtcNow;
+                try { string tc = Path.Combine(Path.GetTempPath(), "claude"); taskTops = Directory.Exists(tc) ? Directory.GetDirectories(tc) : new string[0]; }
+                catch { taskTops = new string[0]; }
+            }
+            int n = 0;
+            foreach (var id in new[] { r.Cli, r.Cli2 }.Where(x => !string.IsNullOrEmpty(x) && x.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 && x != "." && x != "..").Distinct(StringComparer.OrdinalIgnoreCase))
+                foreach (var top in taskTops)
+                {
+                    string dir = Path.Combine(Path.Combine(top, id), "tasks");
+                    if (Directory.Exists(dir)) n += HeldOpen(dir);
+                }
+            cmdCheck[key] = new KeyValuePair<DateTime, int>(DateTime.UtcNow, n);
+            return n;
+        }
+        int HeldOpen(string dir)
+        {
+            FileInfo[] files; try { files = new DirectoryInfo(dir).GetFiles("*.output"); } catch { return 0; }
+            var dayAgo = DateTime.UtcNow.AddHours(-24); int n = 0;
+            foreach (var fi in files)
+            {
+                string f = fi.FullName;
+                if (taskEnded.Contains(f)) continue;
+
+                if (fi.LastWriteTimeUtc < dayAgo) { taskEnded.Add(f); continue; }
+                try { using (new FileStream(f, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete)) { } taskEnded.Add(f); }
+                catch (IOException e) { int code = Marshal.GetHRForException(e) & 0xFFFF; if (code == 32 || code == 33) n++; }
+                catch { }
+            }
+            return n;
         }
 
         static void Decide(StatusResult res, SessRec r, TRec t)
@@ -1649,8 +1933,8 @@ namespace Hive
             var h = Handle;
             Start();
             if (!claude && !background) LaunchClaude();
-            if (SleepAfterMs != 20L * 60 * 1000 || SleepOnly != null || SleepWakeTestMs > 0) Log.W("TEST SETTINGS: sleep after " + (SleepAfterMs / 60000) + " min" + (SleepOnly != null ? ", only " + SleepOnly : "") + (SleepWakeTestMs > 0 ? ", wake by itself after " + (SleepWakeTestMs / 1000) + " s" : ""));
-            Log.W("start v0.67: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
+            if (SleepTestMs > 0 || SleepOnly != null || SleepWakeTestMs > 0) Log.W("TEST SETTINGS: " + (SleepTestMs > 0 ? "every set timer " + (SleepTestMs / 60000) + " min" : "timers as set") +(SleepOnly != null ? ", only " + SleepOnly : "") + (SleepWakeTestMs > 0 ? ", wake by itself after " + (SleepWakeTestMs / 1000) + " s" : ""));
+            Log.W("start v0.80: screen " + mon.Name + " " + T.R(mon.Rect) + " dpi " + mon.Dpi + ", Claude " + (claude ? "open" : "closed") + (background ? ", started with Windows" : "") + ", package " + N.Package());
         }
 
         protected override CreateParams CreateParams { get { var cp = base.CreateParams; cp.ExStyle |= N.WS_EX_TOOLWINDOW | N.WS_EX_NOACTIVATE; return cp; } }
@@ -1669,6 +1953,7 @@ namespace Hive
             if (!S.ContMax && S.ContW > 0) mon = Screens.Of(N.MonitorFromPoint(new N.POINT { X = S.ContX + S.ContW / 2, Y = S.ContY + 20 }, 2));
             else mon = Screens.Choose(S.Screen);
             SetScale(mon.Dpi);
+            S.Screen = mon.Name;
         }
 
         void SetScale(uint dpi)
@@ -1857,7 +2142,10 @@ namespace Hive
             catch { return false; }
         }
 
-        static readonly long SleepAfterMs = TestNum("HIVE_SLEEP_MIN", 20) * 60 * 1000;
+        public static readonly int[] SleepChoices = { 20, 45, 60 };
+        readonly Dictionary<string, long> timerSetAt = new Dictionary<string, long>();
+        readonly HashSet<string> sleepWhenDone = new HashSet<string>();
+        static readonly long SleepTestMs = TestNum("HIVE_SLEEP_MIN", 0) * 60 * 1000;
 
         static readonly string SleepOnly = Environment.GetEnvironmentVariable("HIVE_SLEEP_ONLY");
         static readonly long SleepWakeTestMs = TestNum("HIVE_SLEEP_WAKE_SEC", 0) * 1000;
@@ -1895,14 +2183,48 @@ namespace Hive
             var act = ActiveWin(); var fg = N.GetForegroundWindow();
             foreach (var w in ManagedWins().ToList())
             {
+                int mins; if (!S.SleepAfter.TryGetValue(w.Key, out mins) || mins <= 0) continue;
                 if (w.IsMain || w == act || w.H == fg || w.Key == zoomKey || sleepClosing.ContainsKey(w.H)) continue;
                 if (SleepOnly != null && w.Key != SleepOnly) continue;
                 if (w.State == St.Working || w.State == St.Waiting || w.At <= 0) continue;
-                long quiet = now - Math.Max(w.At, UsedAt(w));
-                if (quiet >= SleepAfterMs) Sleep(w, quiet);
+                long set; if (!timerSetAt.TryGetValue(w.Key, out set)) set = startMs;
+                long quiet = now - Math.Max(Math.Max(w.At, UsedAt(w)), set);
+                if (quiet >= (SleepTestMs > 0 ? SleepTestMs : mins * 60000L)) Sleep(w, "its timer: no work for " + (quiet / 60000) + " min");
             }
         }
-        void Sleep(Win w, long quiet)
+
+        void SleepWhenDoneCheck()
+        {
+            if (sleepWhenDone.Count == 0 || !Live || reopenBusy) return;
+            foreach (var k in sleepWhenDone.ToList())
+            {
+                var w = ByKey(k);
+                if (w == null || w.Sleeping) { sleepWhenDone.Remove(k); continue; }
+                if (w.State == St.Working || w.State == St.Waiting || w.At <= 0 || sleepClosing.ContainsKey(w.H)) continue;
+                sleepWhenDone.Remove(k);
+                Sleep(w, "you chose Sleep now; its work has ended");
+            }
+        }
+        void SleepNow(Win w)
+        {
+            if (w == null || w.IsMain || w.Sleeping || sleepClosing.ContainsKey(w.H)) return;
+            if (w.State == St.Working || w.State == St.Waiting)
+            {
+                sleepWhenDone.Add(w.Key);
+                Log.W("sleeps when its work ends: " + (w.Label ?? w.Title) + " (" + (w.State == St.Working ? "working" : "waiting for you") + " now)");
+                InvalidateChrome(); return;
+            }
+            Sleep(w, "you chose Sleep now");
+        }
+        void SetSleepTimer(string k, int mins)
+        {
+            var w = ByKey(k); string name = w != null ? (w.Label ?? w.Title) : k.Substring(2);
+            if (mins > 0) { S.SleepAfter[k] = mins; timerSetAt[k] = T.Now(); } else { S.SleepAfter.Remove(k); timerSetAt.Remove(k); }
+            S.Save(); InvalidateChrome();
+            Log.W("sleep timer: " + name + ": " + (mins > 0 ? "sleeps after " + mins + " min without work" : "never sleeps by itself"));
+        }
+        static string SleepWords(int mins) { return mins == 60 ? "1 hour" : mins + " minutes"; }
+        void Sleep(Win w, string why)
         {
             string k = w.Key, name = w.Label ?? w.Title;
             if (!S.Sleeping.Contains(k)) S.Sleeping.Add(k);
@@ -1912,7 +2234,7 @@ namespace Hive
             goneSince.Remove(k);
             S.Save();
             sleepClosing[w.H] = T.Now(); sleptAt[k] = T.Now();
-            Log.W("asleep: " + name + " (no work for " + (quiet / 60000) + " min): its window closes; Claude ends its process about 3.5 minutes later");
+            Log.W("asleep: " + name + " (" + why + "): its window closes; Claude ends its process about 3.5 minutes later");
             N.PostMessage(w.H, 0x10, IntPtr.Zero, IntPtr.Zero);
         }
         void Wake(Win g, string why)
@@ -1964,10 +2286,11 @@ namespace Hive
             Log.W("bringing back (" + why + (waitForClaude ? ", Claude has just started" : "") + "): " + missing.Count + " of " + keys.Count + " remembered sessions are not open");
             var th = new Thread(() =>
             {
-                string err = null;
-                try { Reopener.Run(mh, keys, waitForClaude, Log.W, RestackSoon, FreezeHomeFromThread); } catch (Exception e) { err = e.GetType().Name + ": " + e.Message; }
+                string err = null, dialog = null;
+                try { dialog = Reopener.Run(mh, keys, waitForClaude, Log.W, RestackSoon, FreezeHomeFromThread, WidenHomeFromThread); } catch (Exception e) { err = e.GetType().Name + ": " + e.Message; }
+                if (WidenHomeFromThread(false)) Thread.Sleep(350);
                 FreezeHomeFromThread(false);
-                try { BeginInvoke(new Action(() => ReopenDone(act, err))); } catch { reopenBusy = false; }
+                try { BeginInvoke(new Action(() => ReopenDone(act, err, dialog))); } catch { reopenBusy = false; }
             }) { IsBackground = true, Name = "bring back" };
             th.SetApartmentState(ApartmentState.MTA);
             th.Start();
@@ -1992,6 +2315,34 @@ namespace Hive
         void FreezeHomeFromThread(bool on)
         {
             try { Invoke(new Action(delegate { FreezeHome(on); })); } catch { }
+        }
+
+        bool WidenHomeFromThread(bool on) { bool r = false; try { Invoke(new Action(delegate { r = WidenHome(on); })); } catch { } return r; }
+        bool WidenHome(bool on)
+        {
+            var home = all.FirstOrDefault(x => x.IsMain); if (home == null) return false;
+            if (!on)
+            {
+                if (Mover.Hold == IntPtr.Zero) return false;
+                Mover.Hold = IntPtr.Zero;
+                if (Live) ArrangeQuietly(ActiveWin());
+                Log.W("home back to its share after the bring-back");
+                return true;
+            }
+            N.RECT f; if (N.DwmGetWindowAttribute(home.H, N.DWMWA_EXTENDED_FRAME_BOUNDS, out f, Marshal.SizeOf(typeof(N.RECT))) != 0) return false;
+            int fw = f.R - f.L, need = HomeMinW() + (int)Math.Round(20 * sc);
+            if (fw >= HomeMinW()) return false;
+            bool onShow = Live && ShownWins().Contains(home) && N.IsWindowVisible(home.H) && !N.IsIconic(home.H) && !(Zoomed && zoomKey != "main");
+            if (onShow)
+            {
+                if (freezeCover == null) freezeCover = new FreezeCover();
+                freezeCover.Put(new Rectangle(f.L, f.T, need, f.B - f.T));
+            }
+            Mover.Hold = home.H;
+            N.RECT wr; N.GetWindowRect(home.H, out wr);
+            N.SetWindowPos(home.H, IntPtr.Zero, wr.L, wr.T, (wr.R - wr.L) + (need - fw), wr.B - wr.T, N.SWP_NOZORDER | N.SWP_NOACTIVATE | N.SWP_NOOWNERZORDER);
+            Log.W("home widened from " + fw + " to " + need + " px for the bring-back (Claude opens its sidebar from about 950 px)" + (onShow ? ", under a still picture" : ", behind Hive"));
+            return true;
         }
         void FreezeHome(bool on)
         {
@@ -2021,10 +2372,55 @@ namespace Hive
             };
             tm.Start();
         }
-        void ReopenDone(string act, string err)
+
+        long dialogWaitUntil, dialogLookAt; string dialogWhy; volatile bool dialogLooking;
+        void DialogRetry()
+        {
+            if (dialogWaitUntil == 0) return;
+            long now = T.Now();
+            if (now > dialogWaitUntil)
+            {
+                dialogWaitUntil = 0;
+                var left = S.Restore != null ? S.Restore.Where(k => S.Sleeping.Contains(k)).ToList() : new List<string>();
+                foreach (var k in left) S.Restore.Remove(k);
+                S.Save();
+                Log.W("gave up " + dialogWhy + ": the dialog in Claude's main window stayed open for 2 minutes" + (left.Count > 0 ? "; still asleep: " + string.Join(", ", left.Select(k => k.Substring(2))) + " (a click on its tab wakes it)" : ""));
+                return;
+            }
+            if (reopenBusy || dialogLooking || now - dialogLookAt < 3000 || !Live) return;
+            var main = all.FirstOrDefault(w => w.IsMain); if (main == null) return;
+            dialogLookAt = now; dialogLooking = true; IntPtr mh = main.H;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string dn = null;
+                try { dn = Reopener.DialogName(System.Windows.Automation.AutomationElement.FromHandle(mh)); } catch { }
+                try
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        dialogLooking = false;
+                        if (dn != null || dialogWaitUntil == 0) return;
+                        dialogWaitUntil = 0;
+                        Log.W("the dialog in Claude's main window is closed: " + dialogWhy + " now");
+                        StartReopen(dialogWhy + ", after the dialog", false);
+                    }));
+                }
+                catch { dialogLooking = false; }
+            });
+        }
+        void ReopenDone(string act, string err, string dialog = null)
         {
             reopenBusy = false;
             if (err != null) Log.W("bringing back stopped: " + err);
+            if (dialog != null && Live)
+            {
+                var waking = wakeOpen.Where(k => S.Sleeping.Contains(k)).ToList();
+                foreach (var k in waking) wakeOpen.Remove(k);
+                dialogWaitUntil = T.Now() + 120000; dialogLookAt = T.Now();
+                dialogWhy = waking.Count > 0 ? "waking " + string.Join(", ", waking.Select(k => k.Substring(2))) : "bringing back";
+                foreach (var k in S.Restore) if (ByKey(k) == null) expected[k] = dialogWaitUntil + 5000;
+                Log.W(dialogWhy + " waits until the dialog in Claude's main window (" + dialog + ") is closed, for up to 2 minutes; the session then comes back folded");
+            }
             Scan();
             if (!Live) return;
             var a = ByKey(act) ?? ActiveWin();
@@ -2040,18 +2436,20 @@ namespace Hive
             if (wakeLater != null) { var k = wakeLater; wakeLater = null; Win g; if (sleepWins.TryGetValue(k, out g)) Wake(g, "you clicked its tab"); }
         }
 
+        readonly HashSet<string> seenOpen = new HashSet<string>();
         void TrackRestore()
         {
             bool mainHere = all.Any(w => w.IsMain);
             var have = all.Where(w => !w.IsMain).Select(w => w.Key).ToList();
             bool ch = false;
             if (S.Restore == null) { S.Restore = new List<string>(have); ch = true; Log.W("remembers the open session windows: " + have.Count); }
-            foreach (var k in have) { goneSince.Remove(k); if (S.Sleeping.Contains(k)) continue; if (!S.Restore.Contains(k)) { S.Restore.Add(k); ch = true; } }
+            foreach (var k in have) { seenOpen.Add(k); goneSince.Remove(k); if (S.Sleeping.Contains(k)) continue; if (!S.Restore.Contains(k)) { S.Restore.Add(k); ch = true; } }
             if (RememberIds()) ch = true;
             long now = T.Now();
             foreach (var k in S.Restore.ToList())
             {
                 if (have.Contains(k)) continue;
+                if (!seenOpen.Contains(k)) { goneSince.Remove(k); continue; }
                 if (!mainHere || reopenBusy || IsExpected(k)) { goneSince.Remove(k); continue; }
                 long t0;
                 if (!goneSince.TryGetValue(k, out t0)) { goneSince[k] = now; continue; }
@@ -2393,7 +2791,7 @@ namespace Hive
             bool learned = false;
             for (int i = 0; i < S.Parts.Count; i++)
             {
-                var w = ByKey(S.Parts[i]); if (w == null) continue;
+                var w = ByKey(S.Parts[i]); if (w == null || w.H == Mover.Hold) continue;
                 var want = PartRect(i); N.RECT f;
                 if (N.DwmGetWindowAttribute(w.H, N.DWMWA_EXTENDED_FRAME_BOUNDS, out f, Marshal.SizeOf(typeof(N.RECT))) != 0) continue;
                 int m;
@@ -2404,6 +2802,8 @@ namespace Hive
         void Keep()
         {
             SleepCheck();
+            DialogRetry();
+            SleepWhenDoneCheck();
             if (AnyOnTop())
             {
                 var fg = N.GetForegroundWindow(); bool other = !ForegroundIsOurs(fg); var a = ActiveWin();
@@ -2414,7 +2814,7 @@ namespace Hive
             var shown = ShownWins(); var c = Content();
             foreach (var w in ManagedWins())
             {
-                if (N.IsIconic(w.H)) continue;
+                if (N.IsIconic(w.H) || w.H == Mover.Hold) continue;
                 Rectangle want;
                 if (!shown.Contains(w)) want = WaitRect(w);
                 else if (Zoomed) want = c;
@@ -2481,6 +2881,7 @@ namespace Hive
         bool maxPending;
         void RenameKey(string a, string b)
         {
+            if (seenOpen.Remove(a)) seenOpen.Add(b);
 
             if (S.TabOrder.Contains(a)) S.TabOrder.RemoveAll(x => x == b);
             for (int i = 0; i < S.TabOrder.Count; i++) if (S.TabOrder[i] == a) S.TabOrder[i] = b;
@@ -2501,6 +2902,10 @@ namespace Hive
                 Win sw; if (sleepWins.TryGetValue(a, out sw)) { sleepWins.Remove(a); sw.Key = b; sleepWins[b] = sw; }
             }
             for (int i = 0; i < S.Open.Count; i++) if (S.Open[i] == a) S.Open[i] = b;
+            int sa; if (S.SleepAfter.TryGetValue(a, out sa)) { S.SleepAfter.Remove(a); S.SleepAfter[b] = sa; }
+            double cw; if (S.ColW.TryGetValue(a, out cw)) { S.ColW.Remove(a); S.ColW[b] = cw; }
+            long ts; if (timerSetAt.TryGetValue(a, out ts)) { timerSetAt.Remove(a); timerSetAt[b] = ts; }
+            if (sleepWhenDone.Remove(a)) sleepWhenDone.Add(b);
             if (zoomKey == a) zoomKey = b;
             int mw0; if (minW.TryGetValue(a, out mw0)) { minW.Remove(a); minW[b] = mw0; }
             if (focusPending == a) focusPending = b;
@@ -2519,9 +2924,12 @@ namespace Hive
             if (S.Parts.Contains(w.Key) && openRect.TryGetValue(w.Key, out r)) return r;
             int wd = waitW > 0 ? waitW : FocusWidth();
             if (minW.TryGetValue(w.Key, out m)) wd = Math.Max(wd, m);
+
+            wd = Math.Max(wd, FloorOf(w.Key));
             return new Rectangle(c.Left, c.Top, Math.Min(wd, c.Width), c.Height);
         }
         int stdSlack, stdCount;
+        int eqShare;
         int rowOffset;
         void EnsureAll(string want = null, bool mayFold = true)
         {
@@ -2540,12 +2948,14 @@ namespace Hive
             int rowW = c.Width;
             Func<string, int> colW = k => Math.Max(S.Pinned.Contains(k) ? OwnWidth(k) : std, FloorOf(k));
             Func<List<string>, int> need = ks => ks.Sum(colW) + (managed.Count - ks.Count) * sw + Math.Max(0, ks.Count - 1) * g;
-            int max = Math.Max(1, (rowW - managed.Count * sw + g) / Math.Max(1, std - sw + g));
+            int max = S.Columns >= 3 && S.Columns <= 6 ? S.Columns : Math.Max(1, (rowW - managed.Count * sw + g) / Math.Max(1, std - sw + g));
 
+            int nCols = S.Columns >= 3 && S.Columns <= 6 ? S.Columns : 0;
             Func<List<string>, bool> mustFold = ks =>
             {
                 int fixedPx = (managed.Count - ks.Count) * sw + Math.Max(0, ks.Count - 1) * g;
-                if (fixedPx + ks.Sum(k => FloorOf(k)) > rowW) return true;
+                if (fixedPx + ks.Sum(k => ShareFloor(k)) > rowW) return true;
+                if (nCols > 0) return ks.Count > nCols;
                 var stdKeys = ks.Where(k => !S.Pinned.Contains(k)).ToList();
                 if (stdKeys.Count < 2) return false;
                 return stdKeys.Sum(colW) > rowW - fixedPx - ks.Where(k => S.Pinned.Contains(k)).Sum(colW);
@@ -2564,7 +2974,7 @@ namespace Hive
             for (int ai = S.AutoFolded.Count - 1; roomGrew && mayFold && ai >= 0; ai--)
             {
                 var ak = S.AutoFolded[ai]; var aw2 = ByKey(ak); if (aw2 == null || !Managed(aw2)) continue;
-                var trial = new List<string>(openNow) { ak }; if (need(trial) > rowW) break;
+                var trial = new List<string>(openNow) { ak }; if (nCols > 0 ? mustFold(trial) : need(trial) > rowW) break;
                 S.Open.Add(ak); openNow.Add(ak); S.AutoFolded.RemoveAt(ai);
                 Log.W("room again: unfolded " + aw2.Label);
             }
@@ -2574,38 +2984,20 @@ namespace Hive
             for (int i = 0; i + 1 < seq.Count; i++) if (seq[i].Open && seq[i + 1].Open) nGaps++;
             var px = openKeys.Select(colW).ToArray();
             int used = px.Sum() + nSp * sw + nGaps * g;
-            if (used > rowW && px.Length > 0)
+            if (px.Length > 0)
             {
 
-                int over = used - rowW;
-                Func<int, int> floorOf = i => FloorOf(openKeys[i]);
-                foreach (bool pinnedPass in new[] { false, true })
-                {
-                    var give = Enumerable.Range(0, px.Length).Where(i => S.Pinned.Contains(openKeys[i]) == pinnedPass && px[i] > floorOf(i)).ToList();
-                    while (over > 0 && give.Count > 0)
-                    {
-                        int share = Math.Max(1, over / give.Count);
-                        foreach (var i in give.ToList())
-                        {
-                            int cut = Math.Min(Math.Min(share, over), px[i] - floorOf(i)); px[i] -= cut; over -= cut;
-                            if (px[i] <= floorOf(i)) give.Remove(i);
-                            if (over == 0) break;
-                        }
-                    }
-                }
-                if (over > 0) Log.W("row: even the narrowest columns are " + over + " px wider than Hive; the row runs past its right edge");
-                used = rowW + over;
-            }
-
-            if (resizeL == null && used < rowW && px.Length > 0)
-            {
-                var take = Enumerable.Range(0, px.Length).Where(i => !S.Pinned.Contains(openKeys[i])).ToList();
-                if (take.Count > 0) { int extra = rowW - used; foreach (var i in take) px[i] += extra / take.Count; px[take.Last()] += extra % take.Count; used = rowW; }
+                px = EqualShares(openKeys, rowW - nSp * sw - nGaps * g);
+                eqShare = 0; for (int i = 0; i < px.Length; i++) if (openKeys[i] != "main") { eqShare = px[i]; break; }
+                px = WithDragged(openKeys, px, rowW - nSp * sw - nGaps * g);
+                used = px.Sum() + nSp * sw + nGaps * g;
             }
             stdSlack = rowW - used; stdCount = openKeys.Count(k => !S.Pinned.Contains(k));
 
             waitW = std;
             for (int i = 0; i < px.Length; i++) if (!S.Pinned.Contains(openKeys[i])) { waitW = px[i]; break; }
+            { var plain = Enumerable.Range(0, px.Length).Where(i => openKeys[i] != "main").ToList(); if (plain.Count > 0) waitW = px[plain[0]]; }
+            if (eqShare > 0) waitW = eqShare;
 
             int spare = Math.Max(0, rowW - used);
             rowOffset = resizeL != null ? Math.Min(rowOffset, spare) : spare / 2;
@@ -2620,6 +3012,7 @@ namespace Hive
                     px0 += w;
                     if (i + 1 < seq.Count && seq[i + 1].Open)
                     {
+
                         grips.Add(new Grip { R = new Rectangle(px0 - wr.L, c.Top - wr.T, g, c.Height), L = seq[i].K, Rr = seq[i + 1].K });
                         px0 += g;
                     }
@@ -2631,6 +3024,21 @@ namespace Hive
             S.ActivePart = a >= 0 ? a : 0;
             Lay.AutoCurrent = new Lay("all", openKeys.Select(k => new RectangleF(0, 0, 1, 1)).ToArray());
             Relayout();
+        }
+
+        static readonly bool EqualColumns = true;
+
+        int ShareFloor(string k) { int f = MinOpenW(), m; if (k != null && minW.TryGetValue(k, out m)) f = Math.Max(f, m); return f; }
+        int[] EqualShares(List<string> keys, int avail)
+        {
+            var px = new int[keys.Count]; var free = Enumerable.Range(0, keys.Count).ToList(); int left = avail;
+            for (bool again = true; again && free.Count > 0; )
+            {
+                again = false; int share = left / free.Count;
+                foreach (var i in free.ToList()) { int f = ShareFloor(keys[i]); if (f > share) { px[i] = f; left -= f; free.Remove(i); again = true; } }
+            }
+            if (free.Count > 0) { int share = left / free.Count; foreach (var i in free) px[i] = share; px[free.Last()] += left - share * free.Count; }
+            return px;
         }
 
         void OpenKey(string k)
@@ -2645,7 +3053,7 @@ namespace Hive
         void FoldKey(string k)
         {
             if (!S.Open.Contains(k) || S.Open.Count <= 1) return;
-            if (S.Pinned.Contains(k)) { Log.W("not folded, pinned: " + k); return; }
+
             S.Open.Remove(k); S.AutoFolded.Remove(k);
             if (zoomKey == k) zoomKey = null;
             var w = ByKey(k); Log.W("folded: " + (w != null ? w.Label : k));
@@ -2819,6 +3227,7 @@ namespace Hive
             {
                 SaveRect();
                 mon = Screens.Of(N.MonitorFromWindow(Handle, 2)); SetScale(mon.Dpi);
+                S.Screen = mon.Name;
                 S.ContMax = true;
                 SetBounds(WorkRect());
             }
@@ -3064,7 +3473,7 @@ namespace Hive
             {
                 base.WndProc(ref m);
                 var wp = (N.WINDOWPOS)Marshal.PtrToStructure(m.LParam, typeof(N.WINDOWPOS));
-                if ((wp.flags & (N.SWP_NOMOVE | N.SWP_NOSIZE)) != (N.SWP_NOMOVE | N.SWP_NOSIZE)) Follow();
+                if ((wp.flags & (N.SWP_NOMOVE | N.SWP_NOSIZE)) != (N.SWP_NOMOVE | N.SWP_NOSIZE)) { Follow(); if (!inSizeMove) ScreenCheck("moved by Windows"); }
                 return;
             }
             if (m.Msg == 0x0231) inSizeMove = true;
@@ -3079,8 +3488,7 @@ namespace Hive
                     if (r.L != wk.X || r.T != wk.Y || r.W != wk.Width || r.H != wk.Height) { S.ContMax = false; Log.W("moved off maximized (dragged)"); }
                 }
                 SaveRect();
-                var hm = N.MonitorFromWindow(Handle, 2);
-                if (hm != mon.H) mon = Screens.Of(hm);
+                ScreenCheck("dragged");
                 S.Save(); Relayout(); Arrange(ActiveWin());
                 return;
             }
@@ -3091,12 +3499,32 @@ namespace Hive
                 SetScale(dpi);
                 N.SetWindowPos(Handle, IntPtr.Zero, r.L, r.T, r.W, r.H, N.SWP_NOZORDER | N.SWP_NOACTIVATE);
                 mon = Screens.Of(N.MonitorFromWindow(Handle, 2));
+                S.Screen = mon.Name;
                 Relayout(); Invalidate();
                 m.Result = IntPtr.Zero;
                 return;
             }
             if (m.Msg == 0x007E) BeginInvoke(new Action(ReInit));
             base.WndProc(ref m);
+        }
+
+        bool screenMoving;
+        void ScreenCheck(string why)
+        {
+            if (screenMoving || !IsHandleCreated) return;
+            var hm = N.MonitorFromWindow(Handle, 2);
+            if (hm == mon.H) { if (S.Screen != mon.Name) S.Screen = mon.Name; return; }
+            screenMoving = true;
+            try
+            {
+                var nm = Screens.Of(hm);
+                mon = nm; S.Screen = nm.Name;
+                if (Math.Abs(nm.Dpi / 96f - sc) > 0.001f) SetScale(nm.Dpi);
+                Log.W("on another screen (" + why + "): " + nm.Name.Replace(@"\\.\", "") + " " + nm.Rect.W + " x " + nm.Rect.H + ", scaling " + Math.Round(nm.Dpi / 96f * 100) + " %");
+                if (S.ContMax) SetBounds(WorkRect());
+                Relayout(); if (Live) Arrange(ActiveWin()); Invalidate(); S.Save();
+            }
+            finally { screenMoving = false; }
         }
         void ReInit()
         {
@@ -3118,7 +3546,7 @@ namespace Hive
 
         bool Squeezed(Win w) { return S.LayoutId == "all" && Managed(w) && !S.Open.Contains(w.Key); }
         readonly ToolTip tip = new ToolTip { ShowAlways = true };
-        bool hFold, hPin; int foldDown = -1, pinDown = -1;
+        bool hFold, hPin, hSleep; int foldDown = -1, pinDown = -1, sleepDown = -1; Win sleepDownWin;
         readonly List<ActiveFrame> frames = new List<ActiveFrame>(); readonly List<Rectangle> frameRects = new List<Rectangle>(); IntPtr lastSyncFg = IntPtr.Zero;
         void HideFrames() { for (int i = 0; i < frames.Count; i++) { if (frames[i].Visible) frames[i].Hide(); frameRects[i] = Rectangle.Empty; } }
 
@@ -3163,21 +3591,32 @@ namespace Hive
             }
         }
 
-        int FoldRoom() { return S.LayoutId == "all" ? (int)Math.Round(44 * sc) : 0; }
+        int FoldRoom() { return S.LayoutId == "all" ? (int)Math.Round(66 * sc) : 0; }
         Rectangle FoldBtn(int i) { var r = tabR[i]; int b = (int)Math.Round(22 * sc); return new Rectangle(r.Right - b - (int)Math.Round(8 * sc), TabTop() + (H0 - TabTop() - b) / 2, b, b); }
 
         Rectangle PinBtn(int i) { var f = FoldBtn(i); return new Rectangle(f.X - f.Width, f.Y, f.Width, f.Height); }
         bool PinnableHere(int i) { return S.LayoutId == "all" && i >= 0 && i < tabs.Count && i < tabR.Count && Managed(tabs[i]); }
+
+        Rectangle SleepBtn(int i) { var p = PinBtn(i); return new Rectangle(p.X - p.Width, p.Y, p.Width, p.Height); }
+        bool SleepableHere(int i) { return PinnableHere(i) && !tabs[i].IsMain; }
+        bool SleepSet(string k) { return S.SleepAfter.ContainsKey(k) || sleepWhenDone.Contains(k); }
+        string SleepTip(Win w)
+        {
+            int m;
+            if (sleepWhenDone.Contains(w.Key)) return "Sleeps when its work ends. Click for the sleep options";
+            if (S.SleepAfter.TryGetValue(w.Key, out m)) return "Sleeps after " + SleepWords(m) + " without work. Click to change";
+            return "Sleep: now, or after a time without work";
+        }
         bool FoldableHere(int i)
         {
             if (S.LayoutId != "all" || i < 0 || i >= tabs.Count || i >= tabR.Count || !Managed(tabs[i])) return false;
             var w = tabs[i];
             if (!S.Open.Contains(w.Key)) return true;
-            if (S.Pinned.Contains(w.Key)) return false;
+
             int openPresent = S.Open.Count(k => ByKey(k) != null && Managed(ByKey(k)));
             return openPresent > 1;
         }
-        int TabMax() { return (int)Math.Round(320 * sc); }
+        int TabMax() { return (int)Math.Round(342 * sc); }
         int TabFoldRoom(Rectangle r) { return r.Width >= (int)(160 * sc) ? FoldRoom() : 0; }
         int TabNatural(Win w)
         {
@@ -3199,11 +3638,9 @@ namespace Hive
             overflow.Clear(); moreR = Rectangle.Empty;
 
             int avail = right - left, minW = (int)(96 * sc);
-            var pinT = tabs.Select(w => S.Pinned.Contains(w.Key)).ToList();
-            int pinSumT = 0, nFreeT = 0;
-            for (int i = 0; i < tabs.Count; i++) { if (pinT[i]) pinSumT += TabMax(); else nFreeT++; }
-            int each = nFreeT > 0 ? Math.Max(minW, Math.Min(TabMax(), (avail - pinSumT) / nFreeT)) : 0;
-            var widths = tabs.Select((w, i) => pinT[i] ? TabMax() : each).ToList();
+
+            int each = tabs.Count > 0 ? Math.Max(minW, Math.Min(TabMax(), avail / tabs.Count)) : 0;
+            var widths = tabs.Select(w => each).ToList();
             if (widths.Sum() > avail)
             {
                 int mw = (int)(48 * sc), acc = 0, n = 0;
@@ -3440,17 +3877,18 @@ namespace Hive
             else if (st != St.Idle) { Ui.StatusDot(g, st, x, cy, sc, Blink()); x += 14 * sc; }
             var tr = new Rectangle((int)x, tt, Math.Max(1, (int)(r.Right - 12 * sc - TabFoldRoom(r) - x)), H0 - tt);
             TextRenderer.DrawText(g, w.Label ?? "", lit ? fBold : fTab, tr, fg, Ui.Left);
-            bool canPin = PinnableHere(i), canFold = FoldableHere(i);
+            bool canPin = PinnableHere(i), canFold = FoldableHere(i), canSleep = SleepableHere(i);
             if (canPin || canFold)
             {
                 bool hotTab = i == hTab;
                 int b = (int)Math.Round(22 * sc);
                 var fb = new RectangleF(r.Right - b - 8 * sc, tt + (H0 - tt - b) / 2f, b, b);
                 var pb = new RectangleF(fb.X - b, fb.Y, b, b);
+                var sb = new RectangleF(pb.X - b, fb.Y, b, b);
                 if (TabFoldRoom(r) == 0)
                 {
 
-                    float c0 = (canPin ? pb.X : fb.X) - 4 * sc;
+                    float c0 = (canSleep ? sb.X : canPin ? pb.X : fb.X) - 4 * sc;
                     var cover = new RectangleF(c0, fb.Y - 1 * sc, r.Right - 4 * sc - c0, fb.Height + 2 * sc);
                     using (Brush bb = lit ? (Brush)LitFill(tt) : new SolidBrush(bg)) g.FillRectangle(bb, cover);
                 }
@@ -3460,6 +3898,12 @@ namespace Hive
                     bool pinned = S.Pinned.Contains(w.Key), onPin = hotTab && hPin;
                     if (onPin) Ui.FillRound(g, pb, 5 * sc, Ui.C(0x45443f));
                     Ui.PinIcon(g, pb.X + pb.Width / 2f, pb.Y + pb.Height / 2f, sc, onPin || pinned && (hotTab || lit) ? Ui.Ink : (hotTab || lit || pinned ? Ui.Ink2 : Ui.Ink3), pinned);
+                }
+                if (canSleep)
+                {
+                    bool set = SleepSet(w.Key), onSleep = hotTab && hSleep;
+                    if (onSleep) Ui.FillRound(g, sb, 5 * sc, Ui.C(0x45443f));
+                    Ui.MoonMark(g, sb.X + sb.Width / 2f, sb.Y + sb.Height / 2f, sc, onSleep || set && (hotTab || lit) ? Ui.Ink : (hotTab || lit || set ? Ui.Ink2 : Ui.Ink3), set);
                 }
                 if (canFold)
                 {
@@ -3664,7 +4108,7 @@ namespace Hive
             Cursor = gp >= 0 ? Cursors.SizeWE : (sp >= 0 ? Cursors.Hand : Cursors.Default);
             if (t != hTab)
             {
-                if (t >= 0 && t < tabs.Count && t < tabR.Count && tabs[t].Sleeping) tip.Show((tabs[t].Label ?? "") + ": asleep, no work for 20 minutes, so its window is closed to free memory. Click to wake it.", this, tabR[t].X, H0 + Band() + (int)(4 * sc), 4000);
+                if (t >= 0 && t < tabs.Count && t < tabR.Count && tabs[t].Sleeping) tip.Show((tabs[t].Label ?? "") + ": asleep, its window is closed to free memory. Click to wake it.", this, tabR[t].X, H0 + Band() + (int)(4 * sc), 4000);
                 else if (t >= 0 && t < tabs.Count && t < tabR.Count && TabNatural(tabs[t]) > tabR[t].Width + 2) tip.Show(tabs[t].Label ?? "", this, tabR[t].X, H0 + Band() + (int)(4 * sc), 3000);
                 else if (t >= 0 && t < tabs.Count && t < tabR.Count && S.LayoutId == "all" && (Zoomed ? tabs[t].Key == zoomKey : TabLit(tabs[t])))
                     tip.Show(Zoomed ? "F11: back to the columns" : "F11: full screen", this, tabR[t].X, H0 + Band() + (int)(4 * sc), 2000);
@@ -3672,16 +4116,23 @@ namespace Hive
             }
             bool fh = t >= 0 && FoldableHere(t) && FoldBtn(t).Contains(e.Location);
             bool ph = t >= 0 && PinnableHere(t) && PinBtn(t).Contains(e.Location);
-            if (fh != hFold || ph != hPin)
+            bool sh = t >= 0 && SleepableHere(t) && SleepBtn(t).Contains(e.Location);
+            if (fh != hFold || ph != hPin || sh != hSleep)
             {
                 if (fh) tip.Show(S.Open.Contains(tabs[t].Key) ? "Fold it" : "Unfold it", this, FoldBtn(t).X, H0 + Band() + (int)(4 * sc), 2000);
-                else if (ph) tip.Show(S.Pinned.Contains(tabs[t].Key) ? "Unpin it" : "Pin it: it stays open at its width", this, PinBtn(t).X, H0 + Band() + (int)(4 * sc), 2000);
+                else if (ph) tip.Show(S.Pinned.Contains(tabs[t].Key) ? "Unpin it" : "Pin it: it keeps its width and never folds by itself", this, PinBtn(t).X, H0 + Band() + (int)(4 * sc), 2000);
+                else if (sh) tip.Show(SleepTip(tabs[t]), this, SleepBtn(t).X, H0 + Band() + (int)(4 * sc), 3000);
                 else tip.Hide(this);
             }
             if (sp != spineHot && t < 0)
             {
                 if (sp >= 0 && sp < spines.Count) tip.Show("Unfold it", this, spines[sp].R.Right + (int)(6 * sc), spines[sp].TabTop + spines[sp].TabLen - SpineIconH(), 2000);
                 else if (spineHot >= 0) tip.Hide(this);
+            }
+            if (gp != gripHot && t < 0 && resizeL == null)
+            {
+                if (gp >= 0 && gp < grips.Count) tip.Show("Drag: set the widths of these two sessions. Double-click: all open sessions equal", this, grips[gp].R.Right + (int)(6 * sc), Math.Max(H0 + Band(), e.Y + (int)(18 * sc)), 3000);
+                else if (gripHot >= 0) tip.Hide(this);
             }
             if (b != hBtn)
             {
@@ -3694,10 +4145,10 @@ namespace Hive
                 }
                 else if (hBtn != null) tip.Hide(this);
             }
-            if (t != hTab || b != hBtn || gp != gripHot || sp != spineHot || fh != hFold || ph != hPin)
+            if (t != hTab || b != hBtn || gp != gripHot || sp != spineHot || fh != hFold || ph != hPin || sh != hSleep)
             {
-                bool bar = t != hTab || b != hBtn || fh != hFold || ph != hPin; int sp0 = spineHot, gp0 = gripHot;
-                hTab = t; hBtn = b; gripHot = gp; spineHot = sp; hFold = fh; hPin = ph;
+                bool bar = t != hTab || b != hBtn || fh != hFold || ph != hPin || sh != hSleep; int sp0 = spineHot, gp0 = gripHot;
+                hTab = t; hBtn = b; gripHot = gp; spineHot = sp; hFold = fh; hPin = ph; hSleep = sh;
                 if (bar) InvalidateChrome();
                 if (sp != sp0) { InvalidateSpine(sp0); InvalidateSpine(sp); }
                 if (gp != gp0) { InvalidateGrip(gp0); InvalidateGrip(gp); }
@@ -3708,7 +4159,7 @@ namespace Hive
             base.OnMouseLeave(e);
             if (drag || resizeL != null) return;
             int sp0 = spineHot, gp0 = gripHot;
-            hTab = -1; hBtn = null; gripHot = -1; spineHot = -1; hFold = hPin = false; Cursor = Cursors.Default; tip.Hide(this);
+            hTab = -1; hBtn = null; gripHot = -1; spineHot = -1; hFold = hPin = hSleep = false; Cursor = Cursors.Default; tip.Hide(this);
             InvalidateChrome(); InvalidateSpine(sp0); InvalidateGrip(gp0);
         }
         protected override void OnMouseDown(MouseEventArgs e)
@@ -3725,6 +4176,7 @@ namespace Hive
             int t = Hit(tabR, e.Location);
             if (e.Button == MouseButtons.Left && t >= 0 && FoldableHere(t) && FoldBtn(t).Contains(e.Location)) { foldDown = t; foldDownWin = tabs[t]; Capture = true; return; }
             if (e.Button == MouseButtons.Left && t >= 0 && PinnableHere(t) && PinBtn(t).Contains(e.Location)) { pinDown = t; pinDownWin = tabs[t]; Capture = true; return; }
+            if (e.Button == MouseButtons.Left && t >= 0 && SleepableHere(t) && SleepBtn(t).Contains(e.Location)) { sleepDown = t; sleepDownWin = tabs[t]; Capture = true; return; }
             if (e.Button == MouseButtons.Left && t >= 0) { downTab = t; downPt = e.Location; drag = false; Capture = true; dragTab = tabs[t]; grabDx = e.X - tabR[t].X; dragX = e.X; }
 
         }
@@ -3741,7 +4193,7 @@ namespace Hive
             if (upHandling || Capture) return;
             if (resizeL != null && edgeH == IntPtr.Zero) { resizeL = resizeR = null; S.Save(); Arrange(ActiveWin()); Log.W("drag ended: the mouse was taken away"); }
             if (drag) { drag = false; downTab = -1; previewX = null; dragTab = null; previewIdx = -1; tSlide.Start(); Log.W("tab drag cancelled: the mouse was taken away"); }
-            spineDown = -1; spineDownKey = null; foldDown = pinDown = -1; foldDownWin = pinDownWin = null;
+            spineDown = -1; spineDownKey = null; foldDown = pinDown = sleepDown = -1; foldDownWin = pinDownWin = sleepDownWin = null;
         }
         void MouseUpCore(MouseEventArgs e)
         {
@@ -3750,7 +4202,17 @@ namespace Hive
             {
 
                 if (edgeH != IntPtr.Zero) return;
-                if (resizeMoved || Math.Abs(e.X - resizeX0) > 2) DragResize(e.X); else S.FocusW = resizeFocusW0;
+                bool movedIt = resizeMoved || Math.Abs(e.X - resizeX0) > 2;
+                if (movedIt) DragResize(e.X); else S.FocusW = resizeFocusW0;
+                if (movedIt && EqualColumns) { Rectangle lr, rr; openRect.TryGetValue(resizeL, out lr); openRect.TryGetValue(resizeR, out rr); Log.W("handle: " + resizeL.Replace("t:", "") + " " + lr.Width + " px, " + resizeR.Replace("t:", "") + " " + rr.Width + " px"); lastGripKey = null; }
+                if (!movedIt && EqualColumns)
+                {
+
+                    long now = unchecked((uint)GetMessageTime()); var dz = SystemInformation.DoubleClickSize; string gk = resizeL + "|" + resizeR;
+                    bool dbl = gk == lastGripKey && now - lastGripAt <= SystemInformation.DoubleClickTime && Math.Abs(e.X - lastGripPt.X) <= dz.Width && Math.Abs(e.Y - lastGripPt.Y) <= dz.Height;
+                    if (dbl) { lastGripKey = null; resizeL = resizeR = null; EqualizeColumns(); return; }
+                    lastGripKey = gk; lastGripAt = now; lastGripPt = e.Location;
+                }
                 resizeL = resizeR = null; S.Save(); Arrange(ActiveWin()); return;
             }
             if (foldDown >= 0)
@@ -3772,6 +4234,17 @@ namespace Hive
                     tip.Hide(this); hPin = false;
                     lastFoldTab = i; lastFoldAt = unchecked((uint)GetMessageTime());
                     TogglePin(tabs[i]);
+                }
+                return;
+            }
+            if (sleepDown >= 0)
+            {
+                int i = tabs.IndexOf(sleepDownWin); sleepDown = -1; sleepDownWin = null;
+                if (i >= 0 && i < tabR.Count && SleepBtn(i).Contains(e.Location))
+                {
+                    tip.Hide(this); hSleep = false;
+                    lastFoldTab = i; lastFoldAt = unchecked((uint)GetMessageTime());
+                    SleepMenu(i);
                 }
                 return;
             }
@@ -3827,11 +4300,19 @@ namespace Hive
             if (t >= 0) return;
             if (GripAt(e.Location) >= 0)
             {
-                foreach (var k in S.Parts) { S.Widths[k] = 1; if (!S.Pinned.Contains(k)) S.OwnW.Remove(k); }
-                S.FocusW = 0; resizeL = resizeR = null;
-                S.Save(); Arrange(ActiveWin());
-                Log.W("open columns made equal");
+                resizeL = resizeR = null; lastGripKey = null;
+                EqualizeColumns();
             }
+        }
+
+        string lastGripKey; long lastGripAt = -100000; Point lastGripPt;
+        void EqualizeColumns()
+        {
+            foreach (var k in S.Parts) { S.Widths[k] = 1; if (!S.Pinned.Contains(k)) S.OwnW.Remove(k); }
+            S.FocusW = 0;
+            S.ColW.Clear();
+            S.Save(); Arrange(ActiveWin());
+            Log.W("open columns made equal");
         }
 
         string[] Neighbours(string key)
@@ -3847,6 +4328,7 @@ namespace Hive
         void EdgeMove(bool final)
         {
             if (edgeKey == null) return;
+            if (EqualColumns) return;
             N.RECT f; if (N.DwmGetWindowAttribute(edgeH, N.DWMWA_EXTENDED_FRAME_BOUNDS, out f, Marshal.SizeOf(typeof(N.RECT))) != 0) return;
             bool lStill = Math.Abs(f.L - edgeWant.X) <= 2, rStill = Math.Abs(f.R - edgeWant.Right) <= 2;
             if (lStill == rStill) return;
@@ -3904,6 +4386,14 @@ namespace Hive
         }
         void StartResize(string l, string r, int x, string solo = null)
         {
+            if (EqualColumns)
+            {
+                Rectangle a0, b0;
+                if (solo != null || !openRect.TryGetValue(l, out a0) || !openRect.TryGetValue(r, out b0)) return;
+                resizeL = l; resizeR = r; resizeX0 = x; resizeWl = a0.Width; resizeWr = b0.Width; resizeEdge0 = a0.Right;
+                resizeFocusW0 = S.FocusW; resizeMoved = false;
+                return;
+            }
             Rectangle a, b;
             if (!openRect.TryGetValue(l, out a) || !openRect.TryGetValue(r, out b)) return;
             int li = S.Parts.IndexOf(l); if (li < 0) return;
@@ -3931,7 +4421,48 @@ namespace Hive
             foreach (var k in S.Parts) if (!S.Pinned.Contains(k) && openRect.TryGetValue(k, out o)) { S.FocusW = o.Width; return; }
         }
 
-        void DragResize(int clientX) { if (resizeL != null) SetStdLive(resizeL, resizeEdge0 + clientX - resizeX0, true); }
+        void DragResize(int clientX) { if (resizeL == null) return; if (EqualColumns) { DragTwo(clientX); return; } SetStdLive(resizeL, resizeEdge0 + clientX - resizeX0, true); }
+
+        void DragTwo(int clientX)
+        {
+            int d = clientX - resizeX0;
+            d = Math.Max(ShareFloor(resizeL) - resizeWl, Math.Min(resizeWr - ShareFloor(resizeR), d));
+            S.ColW[resizeL] = (resizeWl + d) / (double)sc; S.ColW[resizeR] = (resizeWr - d) / (double)sc;
+            EnsureAll(null, false);
+            if (T.Now() - lastDragPlace >= 30)
+            {
+                lastDragPlace = T.Now();
+                var batch = new List<KeyValuePair<IntPtr, Rectangle>>();
+                foreach (var k in S.Parts) { var w = ByKey(k); Rectangle r; if (w != null && openRect.TryGetValue(k, out r)) batch.Add(new KeyValuePair<IntPtr, Rectangle>(w.H, r)); }
+                Mover.PlaceMany(batch);
+            }
+            Invalidate();
+        }
+
+        int[] WithDragged(List<string> keys, int[] equal, int avail)
+        {
+            int n = keys.Count; if (n == 0 || S.ColW.Count == 0) return equal;
+            var fixedI = Enumerable.Range(0, n).Where(i => S.ColW.ContainsKey(keys[i])).ToList();
+            if (fixedI.Count == 0) return equal;
+            var restI = Enumerable.Range(0, n).Where(i => !fixedI.Contains(i)).ToList();
+            var px = new int[n];
+            int restTotal = 0;
+            if (restI.Count > 0)
+            {
+                var restKeys = restI.Select(i => keys[i]).ToList();
+                int share = avail / n; restTotal = Math.Max(share * restI.Count, restKeys.Sum(k => ShareFloor(k)));
+                var rp = EqualShares(restKeys, restTotal);
+                for (int j = 0; j < restI.Count; j++) px[restI[j]] = rp[j];
+                restTotal = rp.Sum();
+            }
+            int fixedAvail = avail - restTotal;
+            double want = fixedI.Sum(i => Math.Max(ShareFloor(keys[i]), S.ColW[keys[i]] * sc));
+            if (fixedAvail < fixedI.Sum(i => ShareFloor(keys[i])) || want <= 0) return equal;
+            int given = 0;
+            foreach (var i in fixedI) { px[i] = Math.Max(ShareFloor(keys[i]), (int)Math.Round(Math.Max(ShareFloor(keys[i]), S.ColW[keys[i]] * sc) * fixedAvail / want)); given += px[i]; }
+            px[fixedI.Last()] += fixedAvail - given;
+            return px;
+        }
 
         void ReorderTo(Win t, int idx)
         {
@@ -4106,6 +4637,29 @@ namespace Hive
             tip.Hide(this);
             m.Show(this, new Point(moreR.Left, H0), ToolStripDropDownDirection.BelowRight);
         }
+
+        void SleepMenu(int i)
+        {
+            if (JustClosed("sleep") || i < 0 || i >= tabs.Count) return;
+            var w = tabs[i]; string k = w.Key;
+            var m = NewMenu(); m.Tag = "sleep";
+            m.Items.Add(new ToolStripMenuItem("Sleep this session") { Enabled = false });
+            m.Items.Add(new ToolStripSeparator());
+            bool busy = w.State == St.Working || w.State == St.Waiting;
+            var now = Item(busy ? "Sleep when its work ends" : "Sleep now", delegate { SleepNow(ByKey(k)); });
+            now.Checked = sleepWhenDone.Contains(k); m.Items.Add(now);
+            int cur; bool has = S.SleepAfter.TryGetValue(k, out cur);
+            foreach (var mins in SleepChoices)
+            {
+                int mm = mins;
+                var it = Item("After " + SleepWords(mm) + " without work", delegate { SetSleepTimer(k, mm); });
+                it.Checked = has && cur == mm; m.Items.Add(it);
+            }
+            var nv = Item("Never by itself", delegate { SetSleepTimer(k, 0); }); nv.Checked = !has; m.Items.Add(nv);
+            tip.Hide(this);
+            var sbr = SleepBtn(i);
+            m.Show(this, new Point(sbr.Left, H0), ToolStripDropDownDirection.BelowRight);
+        }
         void GearMenu()
         {
             if (JustClosed("gear")) return;
@@ -4124,6 +4678,20 @@ namespace Hive
                 it.Checked = mo.H == mon.H; scr.DropDownItems.Add(it);
             }
             scr.DropDown.Renderer = new DarkRenderer(); scr.DropDown.Font = fMenu; m.Items.Add(scr);
+
+            var cols = new ToolStripMenuItem("Columns at a time");
+            foreach (var n in new[] { 0, 3, 4, 5, 6 })
+            {
+                int nn = n;
+                var it = Item(n == 0 ? "Auto: as many as fit" : n.ToString(), delegate
+                {
+                    S.Columns = nn; S.Save();
+                    Log.W("columns at a time: " + (nn == 0 ? "auto" : nn.ToString()));
+                    Arrange(ActiveWin());
+                });
+                it.Checked = (S.Columns >= 3 && S.Columns <= 6 ? S.Columns : 0) == n; cols.DropDownItems.Add(it);
+            }
+            cols.DropDown.Renderer = new DarkRenderer(); cols.DropDown.Font = fMenu; m.Items.Add(cols);
 
             tip.Hide(this);
             m.Show(this, new Point(gearR.Right, H0), ToolStripDropDownDirection.BelowLeft);
